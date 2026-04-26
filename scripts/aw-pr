@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# aw-pr — soft merge gate around `gh pr create`.
+#
+# Refuses to create the PR if `.agentwf/todos.md` has any unchecked items.
+# Use `aw-pr --force` to bypass after acknowledging the list. All other
+# arguments are forwarded to `gh pr create` unchanged.
+#
+# Exit codes:
+#   0  — PR created (or `gh pr create` exit code on success)
+#   1  — blocked by unchecked todos (force not set)
+#   *  — passthrough from gh
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SYNC="$HERE/todos_sync.py"
+
+force=0
+gh_args=()
+for arg in "$@"; do
+  case "$arg" in
+    --force|-f) force=1 ;;
+    *) gh_args+=("$arg") ;;
+  esac
+done
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+todo_file=""
+[[ -n "$root" ]] && todo_file="$root/.agentwf/todos.md"
+
+if [[ -n "$todo_file" && -f "$todo_file" && "$force" -eq 0 ]]; then
+  unchecked="$(python3 "$SYNC" count --file "$todo_file" --unchecked-only)"
+  if [[ "$unchecked" -gt 0 ]]; then
+    printf '\033[31m✘\033[0m %s unchecked todo(s) in %s:\n' "$unchecked" "$todo_file" >&2
+    grep -E '^\s*-\s*\[[ ~]\]' "$todo_file" | sed 's/^/  /' >&2
+    printf '\nRun \033[1maw-pr --force\033[0m to bypass.\n' >&2
+    exit 1
+  fi
+fi
+
+exec gh pr create "${gh_args[@]}"
