@@ -55,45 +55,54 @@ def main() -> None:
     in_progress = [t for t in todos if t["status"] == "in_progress"]
     pending = [t for t in todos if t["status"] == "pending"]
 
+    # Three-section format: Outcomes (what happened) / Follow Ups (what's
+    # left) / Diffs (the receipts). Sub-labels under Outcomes group the
+    # three input streams (shipped / decided / learned) without inflating
+    # to separate H2s.
     lines: list[str] = [
         f"# Report — {slug}",
+        f"*Branch `{branch}` · HEAD `{head[:12]}` · {timestamp}*",
         "",
-        f"**Branch**: `{branch}`",
-        f"**HEAD**: `{head[:12]}`",
-        f"**Worktree**: `{worktree}`",
-        f"**Generated**: {timestamp}",
+        "## Outcomes",
         "",
-        "## What shipped",
-        "",
+        "**Shipped**",
     ]
     if completed:
         lines.extend(f"- {t['content']}" for t in completed)
     else:
-        lines.append("_(nothing marked completed yet)_")
+        lines.append("- _(nothing marked completed)_")
 
-    lines += ["", "## Decisions resolved", ""]
-    lines.append(decisions if decisions else "_(no Decisions recorded)_")
+    lines += ["", "**Decided**", ""]
+    lines.append(decisions if decisions else "- _(no Decisions recorded)_")
 
-    lines += ["", "## Contexts captured", ""]
-    lines.append(contexts if contexts else "_(no Contexts recorded)_")
+    lines += ["", "**Learned**", ""]
+    lines.append(contexts if contexts else "- _(no Contexts recorded)_")
 
-    lines += ["", "## Open follow-ups", ""]
+    lines += ["", "## Follow Ups", ""]
     remaining = in_progress + pending
     if remaining:
         for t in remaining:
             tag = "in-progress" if t["status"] == "in_progress" else "pending"
             lines.append(f"- ({tag}) {t['content']}")
     else:
-        lines.append("_(none — all to-dos complete)_")
+        lines.append("- _(none — all to-dos complete)_")
 
+    lines += ["", "## Diffs", ""]
     if diff_stat:
-        lines += ["", "## Diff stat", "", "```", diff_stat, "```"]
+        lines += ["```", diff_stat, "```"]
+    else:
+        lines.append("- _(no diff vs. main / HEAD)_")
 
     if include_snap:
         lines += [
-            "", "## Source spec snapshot", "",
-            "_Verbatim copy of `.agentwf/spec.md` at summary time:_",
-            "", "```markdown", text.rstrip(), "```",
+            "",
+            "<details><summary>spec.md snapshot</summary>",
+            "",
+            "```markdown",
+            text.rstrip(),
+            "```",
+            "",
+            "</details>",
         ]
 
     sys.stdout.write("\n".join(lines).rstrip() + "\n")
