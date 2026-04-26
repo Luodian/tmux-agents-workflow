@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# aw-setup — execute .agentwf/setup.sh with shared env vars exported,
+# capture output, and on success mark the corresponding todo as
+# completed and touch .setup-done so SessionStart stops re-listing it.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_aw_env.sh
+source "$HERE/_aw_env.sh"
+aw_resolve_env
+
+aw="$AW_ROOT/.agentwf"
+script="$aw/setup.sh"
+[[ -f "$script" ]] || { echo "aw-setup: $script does not exist (run aw-init?)"; exit 1; }
+[[ -x "$script" ]] || chmod +x "$script"
+
+logf="$aw/.setup.log"
+echo "→ $script  (AW_ROOT=$AW_ROOT, AW_WORKSPACE=$AW_WORKSPACE)" | tee "$logf"
+if "$script" 2>&1 | tee -a "$logf"; then
+  date +%s > "$aw/.setup-done"
+  python3 "$HERE/todos_sync.py" mark "Run .agentwf/setup.sh" \
+    --status completed --file "$aw/todos.md" 2>/dev/null || true
+  echo "✓ setup ok"
+else
+  echo "✘ setup failed; see $logf"
+  exit 1
+fi

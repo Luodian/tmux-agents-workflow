@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # TPM entry point for tmux-agents-workflow.
 #
-# Sibling to tmux-autoname-agent-sessions and tmux-coding-agents. Adds a
-# Conductor-style per-worktree todo list (`.agentwf/todos.md`) that is
-# bidirectionally synced with Claude Code's TodoWrite tool, plus tmux
-# keybindings to view and edit it. Hook scripts under scripts/ are
-# wired into Claude Code via install/settings.json.patch — this .tmux
-# file only registers tmux-side keybindings and the optional status segment.
+# Sibling to tmux-autoname-agent-sessions and tmux-coding-agents. Adds:
+#   - Conductor-style per-worktree todo list (.agentwf/todos.md), bidirectionally
+#     synced with Claude Code's TodoWrite and Codex's update_plan via hooks.
+#   - lifecycle scripts (.agentwf/{setup,archive,run}.sh) executed via aw-* CLIs
+#     bound to tmux keys (prefix + S / A / R / r).
+#   - repo-specific prompts (.agentwf/prompts/*.md) with just-in-time injection
+#     into PreToolUse(Bash) for `gh pr create`, `git commit`, etc.
+#   - a soft merge gate (aw-pr) that refuses to ship with unchecked todos.
+#
+# Hook scripts under scripts/ are wired into Claude Code via
+# install/install.sh — this .tmux file only registers tmux-side keybindings
+# and the optional status-line widget.
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -23,12 +29,11 @@ normalize_key() {
   esac
 }
 
-# Resolve worktree root from current pane's cwd (#{pane_current_path}).
-# The bound shell snippet is evaluated by tmux's run-shell, which inherits
-# the pane's working directory.
+# Resolve worktree root from the focused pane's cwd. Evaluated by run-shell
+# inside each binding, which inherits the pane's working directory.
 git_root_expr='$(git -C "$(tmux display -p "#{pane_current_path}")" rev-parse --show-toplevel 2>/dev/null)'
 
-# ── prefix + t : edit .agentwf/todos.md in a popup ──────────
+# ── prefix + t : edit .agentwf/todos.md in popup ────────────
 edit_key="$(normalize_key "$(tmux_opt '@aw_bind_edit' 't')")"
 if [[ -n "$edit_key" ]]; then
   tmux bind-key "$edit_key" display-popup -E -w 80% -h 80% \
@@ -42,7 +47,40 @@ if [[ -n "$diff_key" ]]; then
     "root=$git_root_expr; cd \"\$root\" && (git -c color.ui=always diff --stat HEAD; echo; git -c color.ui=always diff HEAD) | less -R"
 fi
 
-# ── status-line: optional todo counter ──────────────────────
-# User can `set -ag status-right '#(...)'` to embed; we provide the script.
-status_widget="$CURRENT_DIR/scripts/status-todo-count.sh"
-chmod +x "$status_widget" 2>/dev/null || true
+# ── prefix + S : run aw-setup in popup ──────────────────────
+setup_key="$(normalize_key "$(tmux_opt '@aw_bind_setup' 'S')")"
+if [[ -n "$setup_key" ]]; then
+  tmux bind-key "$setup_key" display-popup -E -w 90% -h 80% \
+    "root=$git_root_expr; cd \"\$root\" && $CURRENT_DIR/scripts/aw-setup; echo; echo 'Press q to close'; read -n 1"
+fi
+
+# ── prefix + A : run aw-archive in popup ────────────────────
+archive_key="$(normalize_key "$(tmux_opt '@aw_bind_archive' 'A')")"
+if [[ -n "$archive_key" ]]; then
+  tmux bind-key "$archive_key" display-popup -E -w 80% -h 60% \
+    "root=$git_root_expr; cd \"\$root\" && $CURRENT_DIR/scripts/aw-archive; echo; echo 'Press q to close'; read -n 1"
+fi
+
+# ── prefix + R : aw-run (start dev process in new window) ───
+run_key="$(normalize_key "$(tmux_opt '@aw_bind_run' 'R')")"
+if [[ -n "$run_key" ]]; then
+  tmux bind-key "$run_key" run-shell \
+    "root=$git_root_expr; cd \"\$root\" && $CURRENT_DIR/scripts/aw-run"
+fi
+
+# ── prefix + r : aw-run --kill (stop the dev process) ───────
+kill_key="$(normalize_key "$(tmux_opt '@aw_bind_kill' 'M-r')")"
+if [[ -n "$kill_key" ]]; then
+  tmux bind-key "$kill_key" run-shell \
+    "root=$git_root_expr; cd \"\$root\" && $CURRENT_DIR/scripts/aw-run --kill"
+fi
+
+# ── prefix + I : aw-init (bootstrap .agentwf/ in popup) ─────
+init_key="$(normalize_key "$(tmux_opt '@aw_bind_init' 'I')")"
+if [[ -n "$init_key" ]]; then
+  tmux bind-key "$init_key" display-popup -E -w 80% -h 70% \
+    "root=$git_root_expr; cd \"\$root\" && $CURRENT_DIR/scripts/aw-init; echo; echo 'Press q to close'; read -n 1"
+fi
+
+# ── status-line widget (optional, user wires manually) ──────
+chmod +x "$CURRENT_DIR/scripts/status-todo-count.sh" 2>/dev/null || true

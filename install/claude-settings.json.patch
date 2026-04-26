@@ -18,7 +18,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 {{PLUGIN_DIR}}/scripts/hook_prompt_submit.py",
+            "command": "python3 {{PLUGIN_DIR}}/scripts/hook_prompt_submit.py --agent claude",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PLUGIN_DIR}}/scripts/hook_pre_bash.py --agent claude",
             "timeout": 3
           }
         ]
@@ -30,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 {{PLUGIN_DIR}}/scripts/hook_post_todo_write.py",
+            "command": "python3 {{PLUGIN_DIR}}/scripts/hook_post_todos.py --agent claude",
             "timeout": 3
           }
         ]

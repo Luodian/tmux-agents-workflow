@@ -47,14 +47,26 @@ BOX_TO_STATUS = {
     "X": "completed",
 }
 
+# Header line `# Workspace todos` and an authorship marker comment line
+# `<!-- last-author: claude|codex -->`. The marker is preserved by
+# md_to_todos (which only matches checkbox lines), so it round-trips safely.
+AUTHOR_MARKER_RE = re.compile(r"<!--\s*last-author:\s*(\w+)\s*-->")
+
 # Match `- [ ] content`, `- [x] content`, `- [~] content`. Leading whitespace tolerated.
 TODO_LINE = re.compile(r"^(\s*)-\s*\[([ xX~])\]\s*(.*)$")
 HEADER_DEFAULT = "# Workspace todos"
 
 
-def todos_to_md(todos: list[dict]) -> str:
-    """Render a TodoWrite-shaped list into markdown checkboxes."""
+def todos_to_md(todos: list[dict], author: str | None = None) -> str:
+    """Render a TodoWrite-shaped list into markdown checkboxes.
+
+    `author` (optional) embeds an HTML comment marker so a peer agent
+    reading the file later can attribute the most recent write.
+    """
     lines: list[str] = [HEADER_DEFAULT, ""]
+    if author:
+        lines.append(f"<!-- last-author: {author} -->")
+        lines.append("")
     for t in todos:
         if not isinstance(t, dict):
             continue
@@ -65,6 +77,75 @@ def todos_to_md(todos: list[dict]) -> str:
         box = STATUS_TO_BOX.get(status, " ")
         lines.append(f"- [{box}] {content}")
     return "\n".join(lines) + "\n"
+
+
+def parse_last_author(text: str) -> str | None:
+    """Read the `<!-- last-author: X -->` marker from a todos.md body."""
+    for line in text.splitlines():
+        m = AUTHOR_MARKER_RE.search(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def normalize_payload(payload: dict) -> tuple[str, list[dict]]:
+    """Convert a Claude TodoWrite or Codex update_plan hook payload into a
+    unified `(source, todos)` tuple.
+
+    Returns:
+      - ("claude", [{content, status, activeForm}])   for Claude TodoWrite
+      - ("codex",  [{content, status, activeForm}])   for Codex update_plan
+      - ("unknown", [])                                for anything else
+    """
+    if not isinstance(payload, dict):
+        return ("unknown", [])
+    tool = payload.get("tool_name", "")
+
+    if tool == "TodoWrite":
+        items = payload.get("tool_input", {}).get("todos", []) or []
+        out: list[dict] = []
+        for t in items:
+            if not isinstance(t, dict):
+                continue
+            content = (t.get("content") or "").strip()
+            if not content:
+                continue
+            out.append({
+                "content": content,
+                "status": t.get("status", "pending"),
+                "activeForm": t.get("activeForm") or content,
+            })
+        return ("claude", out)
+
+    if tool == "update_plan":
+        ti = payload.get("tool_input", {}) or {}
+        # Codex sometimes nests under arguments (string or dict), sometimes flat.
+        plan = None
+        for source in (ti.get("arguments"), ti):
+            if isinstance(source, str):
+                try:
+                    source = json.loads(source)
+                except Exception:
+                    continue
+            if isinstance(source, dict) and isinstance(source.get("plan"), list):
+                plan = source["plan"]
+                break
+        plan = plan or []
+        out = []
+        for p in plan:
+            if not isinstance(p, dict):
+                continue
+            step = (p.get("step") or "").strip()
+            if not step:
+                continue
+            out.append({
+                "content": step,
+                "status": p.get("status", "pending"),
+                "activeForm": step,
+            })
+        return ("codex", out)
+
+    return ("unknown", [])
 
 
 def md_to_todos(text: str) -> list[dict]:

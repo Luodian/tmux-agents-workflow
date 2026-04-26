@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""PostToolUse(TodoWrite) hook: agent → file.
+"""PostToolUse hook for Claude TodoWrite **and** Codex update_plan.
 
-Reads the Claude Code hook payload from stdin, extracts the new TodoWrite
-list, and overwrites `.agentwf/todos.md` in the cwd's git worktree root.
-Updates `.agentwf/.last-seen-todos` so the UserPromptSubmit hook does not
-falsely flag this write as an external edit.
+The matcher in hooks.json filters by tool_name (`TodoWrite` for Claude,
+`update_plan` for Codex). This single script handles either schema via
+`todos_sync.normalize_payload`, then writes a unified markdown checkbox
+file to `.agentwf/todos.md` with a `<!-- last-author: X -->` marker so
+peer agents can attribute the most recent edit.
+
+Usage:
+    hook_post_todos.py --agent claude    # in Claude settings.json
+    hook_post_todos.py --agent codex     # in Codex hooks.json
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -17,7 +23,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from todos_sync import todos_to_md  # noqa: E402
+from todos_sync import normalize_payload, todos_to_md  # noqa: E402
 
 
 def git_root(cwd: str) -> str | None:
@@ -31,15 +37,17 @@ def git_root(cwd: str) -> str | None:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--agent", default="claude", choices=["claude", "codex"])
+    args = ap.parse_args()
+
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return
-    if payload.get("tool_name") != "TodoWrite":
-        return
 
-    todos = payload.get("tool_input", {}).get("todos", [])
-    if not isinstance(todos, list):
+    source, todos = normalize_payload(payload)
+    if source == "unknown":
         return
 
     cwd = payload.get("cwd") or os.getcwd()
@@ -50,7 +58,9 @@ def main() -> None:
     aw_dir = os.path.join(root, ".agentwf")
     os.makedirs(aw_dir, exist_ok=True)
 
-    body = todos_to_md(todos)
+    # Author preference: --agent flag wins, fall back to detected source.
+    author = args.agent or source
+    body = todos_to_md(todos, author=author)
     with open(os.path.join(aw_dir, "todos.md"), "w", encoding="utf-8") as f:
         f.write(body)
 

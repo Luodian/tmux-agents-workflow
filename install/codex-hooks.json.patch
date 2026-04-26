@@ -1,0 +1,64 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PLUGIN_DIR}}/scripts/hook-session-start.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PLUGIN_DIR}}/scripts/hook_prompt_submit.py --agent codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PLUGIN_DIR}}/scripts/hook_pre_bash.py --agent codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "update_plan",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PLUGIN_DIR}}/scripts/hook_post_todos.py --agent codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PLUGIN_DIR}}/scripts/hook-stop-diff.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

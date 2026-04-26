@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# aw-archive — run .agentwf/archive.sh to clean caches before the
+# worktree is torn down. Pair with worktree-warden's prune flow.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_aw_env.sh
+source "$HERE/_aw_env.sh"
+aw_resolve_env
+
+script="$AW_ROOT/.agentwf/archive.sh"
+[[ -f "$script" ]] || { echo "aw-archive: $script does not exist (run aw-init?)"; exit 1; }
+[[ -x "$script" ]] || chmod +x "$script"
+
+echo "→ $script  (AW_ROOT=$AW_ROOT, AW_WORKSPACE=$AW_WORKSPACE)"
+"$script"
+echo "✓ archive ok"

@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# aw-init — bootstrap .agentwf/ scaffold for the current repo.
+#
+# Creates setup.sh / archive.sh / run.sh skeletons (with sensible defaults
+# inferred from repo signals) and prompts/{pr,prefs,commit,review}.md
+# starter templates. Idempotent: never overwrites existing files; pass
+# `--force` to overwrite.
+#
+# Usage:
+#   aw-init                # create missing scaffolding
+#   aw-init --force        # overwrite existing files
+#   aw-init --git-track    # also `git add` the new files
+
+set -euo pipefail
+# Don't die when piped into head/grep: diagnostic output is best-effort,
+# file writes (cp / cat-to-fd) target specific paths, not stdout.
+trap '' PIPE
+
+force=0
+gittrack=0
+for a in "$@"; do
+  case "$a" in
+    --force) force=1 ;;
+    --git-track) gittrack=1 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $a" >&2; exit 2 ;;
+  esac
+done
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATES_DIR="$(cd "$HERE/../templates" 2>/dev/null && pwd || true)"
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$root" ]] || { echo "aw-init: not in a git repo" >&2; exit 1; }
+
+aw="$root/.agentwf"
+mkdir -p "$aw" "$aw/prompts"
+
+write_if_missing() {
+  local path="$1"; shift
+  if [[ -e "$path" && "$force" -eq 0 ]]; then
+    # Drain stdin so the LHS of `{...} | write_if_missing` doesn't write
+    # to a closed pipe and die from SIGPIPE (subshells reset our trap).
+    cat > /dev/null
+    echo "  skip   $path (exists, --force to overwrite)"
+    return
+  fi
+  cat > "$path"
+  chmod +x "$path" 2>/dev/null || true
+  echo "  wrote  $path"
+}
+
+# ── Detect signals ─────────────────────────────────────────
+has_python=0; has_node=0; has_rust=0; has_go=0; has_pre_commit=0
+[[ -f "$root/pyproject.toml" || -f "$root/setup.py" || -f "$root/requirements.txt" ]] && has_python=1
+[[ -f "$root/package.json" ]] && has_node=1
+[[ -f "$root/Cargo.toml" ]] && has_rust=1
+[[ -f "$root/go.mod" ]] && has_go=1
+[[ -f "$root/.pre-commit-config.yaml" ]] && has_pre_commit=1
+has_uv=0; [[ -f "$root/uv.lock" ]] && has_uv=1
+
+# ── setup.sh ───────────────────────────────────────────────
+{
+  echo "#!/usr/bin/env bash"
+  echo "# .agentwf/setup.sh — runs (or shows up as a todo) on first session in this worktree."
+  echo "# Env: \$AW_ROOT (git toplevel), \$AW_WORKSPACE (branch name)"
+  echo "set -e"
+  echo "cd \"\$AW_ROOT\""
+  echo
+  echo "git submodule update --init --recursive"
+  echo "git fetch --prune origin main 2>/dev/null || true"
+  # `||:` keeps each conditional exit-0 so set -euo pipefail doesn't kill
+  # the subshell when a feature isn't present (e.g. no .pre-commit-config).
+  [[ "$has_pre_commit" -eq 1 ]] && echo "command -v pre-commit >/dev/null && pre-commit install --install-hooks" ||:
+  [[ "$has_uv" -eq 1 ]] && echo "command -v uv >/dev/null && uv sync --all-extras 2>/dev/null || true" ||:
+  [[ "$has_python" -eq 1 && "$has_uv" -eq 0 ]] && echo "# pip install -e ." ||:
+  [[ "$has_node" -eq 1 ]] && echo "command -v pnpm >/dev/null && pnpm install || npm install" ||:
+  [[ "$has_rust" -eq 1 ]] && echo "cargo fetch" ||:
+  [[ "$has_go" -eq 1 ]] && echo "go mod download" ||:
+} | write_if_missing "$aw/setup.sh"
+
+# ── archive.sh ─────────────────────────────────────────────
+cat <<'EOF' | write_if_missing "$aw/archive.sh"
+#!/usr/bin/env bash
+# .agentwf/archive.sh — runs before this worktree is torn down.
+# Removes caches that bloat disk; preserves source-tracked files.
+set -e
+cd "$AW_ROOT"
+
+find . -type d \( -name __pycache__ -o -name .ruff_cache -o -name .pytest_cache -o -name .mypy_cache \) \
+  -not -path './.git/*' -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name '*.egg-info' -not -path './.git/*' -exec rm -rf {} + 2>/dev/null || true
+rm -rf .venv .ipynb_checkpoints node_modules/.cache target/debug 2>/dev/null || true
+EOF
+
+# ── run.sh ─────────────────────────────────────────────────
+{
+  echo "#!/usr/bin/env bash"
+  echo "# .agentwf/run.sh — long-running dev process (server, watcher, test loop)."
+  echo "# Env: \$AW_ROOT, \$AW_WORKSPACE, \$AW_PORT (free port allocated by aw-run)"
+  echo "# aw-run kills any previous instance with SIGHUP→200ms→SIGKILL before starting."
+  echo "set -e"
+  echo "cd \"\$AW_ROOT\""
+  echo
+  if [[ "$has_python" -eq 1 ]]; then
+    echo "# example:"
+    echo "# python3 -m http.server --bind 127.0.0.1 \"\$AW_PORT\""
+  elif [[ "$has_node" -eq 1 ]]; then
+    echo "# example:"
+    echo "# PORT=\"\$AW_PORT\" npm run dev"
+  else
+    echo "# replace with your dev/test loop"
+    echo "echo 'no run command configured; edit .agentwf/run.sh'"
+    echo "sleep infinity"
+  fi
+} | write_if_missing "$aw/run.sh"
+
+# ── prompts/ ───────────────────────────────────────────────
+# Prompt files live as standalone templates so users can fork them as
+# files without rewriting aw-init. Source: ../templates/prompts/*.md
+copy_template() {
+  # Separate `local` lines: `local a=$x b=$a` parses both expansions before
+  # either assignment, so $a in the second slot refers to the OUTER a (unset
+  # under `set -u`).
+  local name="$1"
+  local src="$TEMPLATES_DIR/prompts/$name"
+  local dst="$aw/prompts/$name"
+  [[ -f "$src" ]] || { echo "  miss   $src (template not found)"; return; }
+  if [[ -e "$dst" && "$force" -eq 0 ]]; then
+    echo "  skip   $dst (exists, --force to overwrite)"
+    return
+  fi
+  cp "$src" "$dst"
+  echo "  wrote  $dst"
+}
+for f in pr.md prefs.md commit.md review.md; do copy_template "$f"; done
+
+# ── git track if requested ─────────────────────────────────
+if [[ "$gittrack" -eq 1 ]]; then
+  git -C "$root" add .agentwf
+  echo
+  echo "Staged .agentwf/ — review and commit when ready."
+fi
+
+echo
+echo "Done. Edit .agentwf/{setup,archive,run}.sh and prompts/*.md to taste."

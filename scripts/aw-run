@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# aw-run — Conductor-style "Run" button.
+#
+# Spawns .agentwf/run.sh in a new tmux window named `run:<workspace>`.
+# Default mode is nonconcurrent: any prior instance is killed via
+# SIGHUP → 200ms → SIGKILL before the new one starts. PID is tracked
+# at .agentwf/.run.pid; a fresh free TCP port is allocated and exported
+# as $AW_PORT.
+#
+# Flags:
+#   --kill           stop the current run, do not start a new one
+#   --concurrent     skip the kill-previous step (start additional copy)
+#   --foreground     run in current pane instead of spawning new window
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_aw_env.sh
+source "$HERE/_aw_env.sh"
+aw_resolve_env
+
+mode_kill=0
+mode_concurrent=0
+mode_fg=0
+for a in "$@"; do
+  case "$a" in
+    --kill) mode_kill=1 ;;
+    --concurrent) mode_concurrent=1 ;;
+    --foreground|--fg) mode_fg=1 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $a" >&2; exit 2 ;;
+  esac
+done
+
+aw="$AW_ROOT/.agentwf"
+script="$aw/run.sh"
+pidfile="$aw/.run.pid"
+
+stop_previous() {
+  [[ -f "$pidfile" ]] || return 0
+  local pid
+  pid="$(<"$pidfile")"
+  [[ -n "$pid" ]] || { rm -f "$pidfile"; return 0; }
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "→ stopping previous run pid=$pid (SIGHUP)"
+    # Send to the process group (negative pid) so child shells die too.
+    kill -HUP -- "-$pid" 2>/dev/null || kill -HUP "$pid" 2>/dev/null || true
+    sleep 0.2
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "  still alive, SIGKILL"
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$pidfile"
+}
+
+if [[ "$mode_kill" -eq 1 ]]; then
+  stop_previous
+  exit 0
+fi
+
+[[ -f "$script" ]] || { echo "aw-run: $script does not exist (run aw-init?)"; exit 1; }
+[[ -x "$script" ]] || chmod +x "$script"
+
+[[ "$mode_concurrent" -eq 1 ]] || stop_previous
+
+AW_PORT="$(aw_alloc_port)"
+export AW_PORT
+
+# Wrapper script: writes own pgid as pid, becomes its own process group leader,
+# execs the user run.sh. Saved to a tempfile so quoting stays sane.
+wrapper="$(mktemp -t aw-run-wrapper.XXXXXX)"
+trap 'rm -f "$wrapper"' EXIT
+cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+set -e
+echo \$\$ > "$pidfile"
+export AW_ROOT="$AW_ROOT" AW_WORKSPACE="$AW_WORKSPACE" AW_PORT="$AW_PORT"
+exec "$script"
+EOF
+chmod +x "$wrapper"
+
+label="run:$AW_WORKSPACE"
+echo "→ $script  (AW_PORT=$AW_PORT, window=$label)"
+
+if [[ "$mode_fg" -eq 1 || -z "${TMUX:-}" ]]; then
+  setsid -f "$wrapper" 2>/dev/null || "$wrapper"
+  exit 0
+fi
+
+# Spawn dedicated window. -d keeps user focused on the agent window.
+tmux new-window -d -a -n "$label" "$wrapper" 2>/dev/null || \
+  tmux new-window -a -n "$label" "$wrapper"
