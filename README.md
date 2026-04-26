@@ -6,7 +6,7 @@ and [Codex CLI](https://github.com/openai/codex) sessions.
 
 ```
 .agentwf/                              # everything per-worktree, git-trackable
-├── todos.md                           # source of truth (markdown checkboxes)
+├── spec.md                            # live spec: Contexts / Decisions / To-dos
 ├── setup.sh                           # runs / shows up as todo on first session
 ├── archive.sh                         # tearing down the worktree (cache cleanup)
 ├── run.sh                             # long-running dev process (server, watcher)
@@ -17,6 +17,24 @@ and [Codex CLI](https://github.com/openai/codex) sessions.
     └── review.md                      # self-review checklist
 ```
 
+`spec.md` has three top-level sections — agent maintains all three, user
+edits any of them in Neovim (auto-opens in a right-side split pane on
+session start):
+
+```markdown
+## Contexts          # observations, premises, constraints discovered
+## Decisions         # `### Dn: <title>` blocks with checkbox options +
+                     # `**Recommended**` pick — agent proceeds with the
+                     # [x]'d option, user overrides by re-checking
+## To-dos            # bidirectionally synced with TodoWrite / update_plan
+```
+
+Decisions section is the **non-blocking** alternative to AskUserQuestion-
+style click popups — agent appends a decision, picks Recommended, keeps
+working; user reviews in Neovim and can change the `[x]` to override at
+their leisure. Use AskUserQuestion only when you genuinely can't
+proceed without the answer.
+
 Sibling to [`tmux-autoname-agent-sessions`](https://github.com/Luodian/tmux-autoname-agent-sessions)
 (window naming) and [`tmux-coding-agents`](https://github.com/Luodian/tmux-coding-agents)
 (picker / history). Each plugin handles one concern; combine them.
@@ -25,13 +43,13 @@ Sibling to [`tmux-autoname-agent-sessions`](https://github.com/Luodian/tmux-auto
 
 | Capability | Mechanism |
 |---|---|
-| Per-worktree todo list, blocks `aw-pr` until unchecked items resolve | `.agentwf/todos.md` + `aw-pr` wrapper around `gh pr create` |
+| Per-worktree todo list, blocks `aw-pr` until unchecked items resolve | `.agentwf/spec.md` + `aw-pr` wrapper around `gh pr create` |
 | Bidirectional sync with agent's plan tool | Claude `TodoWrite` / Codex `update_plan` → `PostToolUse` hook → file; file change → `UserPromptSubmit` `additionalContext` → agent |
 | Auto-populated todos on session start | worktree-isolation gate, "Run setup.sh", "Open PR" sentinel |
 | Per-commit diff window | `Stop` hook detects HEAD move → opens `lazygit` (or `git show HEAD | less`) in a background tmux window named `diff:<sha>` |
 | Repo lifecycle scripts (setup / archive / run) | `aw-setup` / `aw-archive` / `aw-run`, with `$AW_ROOT` / `$AW_WORKSPACE` / `$AW_PORT` env, SIGHUP→200ms→SIGKILL nonconcurrent run mode |
 | Repo-specific prompts injected just-in-time | `PreToolUse(Bash)` matches `gh pr create` / `git commit` → injects `prompts/{pr,commit}.md` as `additionalContext` |
-| Multi-agent coexistence (Claude + Codex on the same workspace) | `<!-- last-author: claude\|codex -->` marker in todos.md; peer agent gets a "previous update from X" note on next turn |
+| Multi-agent coexistence (Claude + Codex on the same workspace) | `<!-- last-author: claude\|codex -->` marker in spec.md; peer agent gets a "previous update from X" note on next turn |
 
 ## Install
 
@@ -86,7 +104,8 @@ ln -s ~/.tmux/plugins/tmux-agents-workflow/scripts/aw-pr ~/.local/bin/aw-pr
 
 | Key | Action |
 |---|---|
-| `prefix + t` | edit `.agentwf/todos.md` in popup |
+| `prefix + t` | open `.agentwf/spec.md` in nvim split pane (right, idempotent) |
+| `prefix + e` | edit `.agentwf/spec.md` in transient popup (raw editor) |
 | `prefix + D` | full `git diff HEAD` in popup |
 | `prefix + S` | run `aw-setup` in popup |
 | `prefix + A` | run `aw-archive` in popup |
@@ -102,6 +121,9 @@ Override any binding via `set -g @aw_bind_<name>`. See `tmux-agents-workflow.tmu
 # Stop-hook diff window
 set -g @aw_open_diff     'on'        # 'off' to disable auto-window
 set -g @aw_diff_command  ''           # default: lazygit if on PATH, else git show | less
+
+# Auto-spawn the spec.md nvim pane on Claude/Codex session start
+set -g @aw_auto_spec     'on'        # 'off' to disable
 
 # Status-line counter (manual wire)
 set -ag status-right ' #(~/.tmux/plugins/tmux-agents-workflow/scripts/status-todo-count.sh)'
@@ -124,7 +146,7 @@ prose, the author marker) are preserved on round-trip.
 
 | Conductor | Here |
 |---|---|
-| Setup script auto-run | `aw-setup` (manual) or todos.md prompt; `@aw_auto_setup on` opt-in to fire from SessionStart (planned) |
+| Setup script auto-run | `aw-setup` (manual) or spec.md prompt; `@aw_auto_setup on` opt-in to fire from SessionStart (planned) |
 | Run script + nonconcurrent + SIGHUP→SIGKILL | `aw-run` exact match |
 | Archive script | `aw-archive` |
 | `$CONDUCTOR_*` env | `$AW_ROOT` / `$AW_WORKSPACE` / `$AW_PORT` |

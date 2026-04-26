@@ -33,11 +33,19 @@ normalize_key() {
 # inside each binding, which inherits the pane's working directory.
 git_root_expr='$(git -C "$(tmux display -p "#{pane_current_path}")" rev-parse --show-toplevel 2>/dev/null)'
 
-# ── prefix + t : edit .agentwf/todos.md in popup ────────────
-edit_key="$(normalize_key "$(tmux_opt '@aw_bind_edit' 't')")"
+# ── prefix + t : open .agentwf/spec.md in nvim split pane (right) ──
+# Idempotent: if a spec pane is already alive, re-select it.
+spec_key="$(normalize_key "$(tmux_opt '@aw_bind_spec' 't')")"
+if [[ -n "$spec_key" ]]; then
+  tmux bind-key "$spec_key" run-shell \
+    "root=$git_root_expr; cd \"\$root\" && $CURRENT_DIR/scripts/aw-spec"
+fi
+
+# ── prefix + e : popup-edit fallback (raw editor on spec.md) ────────
+edit_key="$(normalize_key "$(tmux_opt '@aw_bind_edit' 'e')")"
 if [[ -n "$edit_key" ]]; then
   tmux bind-key "$edit_key" display-popup -E -w 80% -h 80% \
-    "root=$git_root_expr; mkdir -p \"\$root/.agentwf\"; \${EDITOR:-vi} \"\$root/.agentwf/todos.md\""
+    "root=$git_root_expr; mkdir -p \"\$root/.agentwf\"; \${EDITOR:-vi} \"\$root/.agentwf/spec.md\""
 fi
 
 # ── prefix + D : git diff popup (on-demand fallback) ────────

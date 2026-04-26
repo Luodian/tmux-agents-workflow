@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# aw-notify — fire a system notification.
+#
+# Backend cascade (first available wins):
+#   1. macOS Notification Center via osascript          [most reliable]
+#   2. terminal-notifier                                  [if installed]
+#   3. OSC 9 (xterm-style, wrapped in tmux DCS if needed) [Ghostty / iTerm2]
+#   4. tmux display-message                               [in-session bell]
+#
+# Usage:
+#   aw-notify "title" "message"
+#   aw-notify "title"           # body defaults to title
+#   AW_NOTIFY_SOUND=Tink aw-notify ...   # macOS sound name (default: Pop)
+
+set -euo pipefail
+trap '' PIPE
+
+title="${1:-tmux-agents-workflow}"
+body="${2:-$title}"
+sound="${AW_NOTIFY_SOUND:-Pop}"
+
+if [[ "$(uname -s)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+  # AppleScript needs double-quotes inside single-quotes — escape any double-quotes in inputs.
+  esc_title=$(printf '%s' "$title" | sed 's/"/\\"/g')
+  esc_body=$(printf '%s' "$body" | sed 's/"/\\"/g')
+  osascript -e "display notification \"$esc_body\" with title \"$esc_title\" sound name \"$sound\"" 2>/dev/null && exit 0
+fi
+
+if command -v terminal-notifier >/dev/null 2>&1; then
+  terminal-notifier -title "$title" -message "$body" -sound "$sound" >/dev/null 2>&1 && exit 0
+fi
+
+# OSC 9 (Ghostty / iTerm2 / xterm-compatible). When inside tmux, wrap in
+# DCS tmux passthrough — requires `set -g allow-passthrough on` (tmux 3.3+).
+if [[ -n "${TMUX:-}" ]]; then
+  printf '\ePtmux;\e\033]9;%s\007\e\\' "$title — $body"
+else
+  printf '\033]9;%s\007' "$title — $body"
+fi
+
+# Final fallback: tmux in-session bell.
+if [[ -n "${TMUX:-}" ]]; then
+  tmux display-message "$title — $body" 2>/dev/null || true
+fi

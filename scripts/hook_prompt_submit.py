@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook: surface workspace state to the agent.
+"""UserPromptSubmit hook: surface workspace-state changes to the agent.
 
 Two pieces of context, both via `additionalContext`:
 
-1. Todo list change-detection — when `.agentwf/todos.md` changed since
-   the last fire, emit the new contents. If the previous author was a
-   peer agent (Codex when --agent claude, or vice versa), prepend a
-   note so the agent knows whose write to acknowledge.
+1. **Spec change** — `.agentwf/spec.md` contains the live spec
+   (Contexts / Decisions / To-dos). When sha changes since last firing,
+   inject the full file with a peer-agent attribution note when the
+   last writer was a different agent.
 
-2. Prompt index — when `.agentwf/prompts/*.md` exist, list them once so
-   the agent knows resources are available to read on demand
-   (just-in-time content injection happens via PreToolUse, not here).
+2. **Prompt index** — list `.agentwf/prompts/*.md` once when first seen,
+   so the agent knows the resources are available (specific contents
+   are auto-injected at point-of-use by the PreToolUse hook).
 
 Usage:
     hook_prompt_submit.py --agent claude
@@ -25,12 +25,15 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from todos_sync import parse_last_author  # noqa: E402
+from todos_sync import SPEC_FILE_NAME, parse_last_author  # noqa: E402
+
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 def git_root(cwd: str) -> str | None:
@@ -59,41 +62,47 @@ def main() -> None:
         return
 
     aw = os.path.join(root, ".agentwf")
-    todo_file = os.path.join(aw, "todos.md")
-    last_seen_file = os.path.join(aw, ".last-seen-todos")
+    spec_file = os.path.join(aw, SPEC_FILE_NAME)
+    spec_seen = os.path.join(aw, ".last-seen-spec")
     prompts_dir = os.path.join(aw, "prompts")
-    prompts_seen_file = os.path.join(aw, ".last-seen-prompts")
+    prompts_seen = os.path.join(aw, ".last-seen-prompts")
 
     bits: list[str] = []
 
-    # 1. Todo change detection.
-    if os.path.exists(todo_file):
-        with open(todo_file, "rb") as f:
+    # 1. Spec change detection.
+    if os.path.exists(spec_file):
+        with open(spec_file, "rb") as f:
             body = f.read()
-        cur = hashlib.sha1(body).hexdigest()
-        last = ""
-        if os.path.exists(last_seen_file):
-            with open(last_seen_file, "r", encoding="utf-8") as f:
-                last = f.read().strip()
-        if cur != last:
-            with open(last_seen_file, "w", encoding="utf-8") as f:
-                f.write(cur)
+        cur_hash = hashlib.sha1(body).hexdigest()
+        last_hash = ""
+        if os.path.exists(spec_seen):
+            with open(spec_seen, "r", encoding="utf-8") as f:
+                last_hash = f.read().strip()
+        if cur_hash != last_hash:
+            os.makedirs(os.path.dirname(spec_seen), exist_ok=True)
+            with open(spec_seen, "w", encoding="utf-8") as f:
+                f.write(cur_hash)
             text = body.decode("utf-8", errors="replace")
+            # Strip HTML comments — they're for human readers, not agent context.
+            visible = HTML_COMMENT.sub("", text).strip() + "\n"
             author = parse_last_author(text)
             peer_note = ""
             if author and author != args.agent:
                 peer_note = (
-                    f"NOTE: peer agent **{author}** wrote this update. "
-                    "If your in-memory plan is out of sync, refresh it.\n\n"
+                    f"NOTE: peer agent **{author}** wrote the most recent "
+                    "update. Reconcile your in-memory plan if it diverges.\n\n"
                 )
             bits.append(
-                "Persistent workspace todo list (.agentwf/todos.md) changed:\n\n"
+                "Workspace spec (`.agentwf/spec.md`) changed since last turn:\n\n"
                 + peer_note
-                + text
-                + "\nLegend: [x]=completed, [~]=in_progress, [ ]=pending."
+                + visible
+                + "\nLegend: To-dos `[ ]`/`[~]`/`[x]` = pending/in_progress/completed. "
+                "Decisions: the `[x]`-marked option is the active choice (defaults to "
+                "**Recommended** until the user picks). Edit any section directly via "
+                "Write/Edit on the spec file."
             )
 
-    # 2. Prompt index — only emit on first change to avoid per-turn noise.
+    # 2. Prompt index.
     if os.path.isdir(prompts_dir):
         files = sorted(
             f for f in os.listdir(prompts_dir)
@@ -103,20 +112,17 @@ def main() -> None:
             joined = ",".join(files)
             cur_idx = hashlib.sha1(joined.encode()).hexdigest()
             last_idx = ""
-            if os.path.exists(prompts_seen_file):
-                with open(prompts_seen_file, "r", encoding="utf-8") as f:
+            if os.path.exists(prompts_seen):
+                with open(prompts_seen, "r", encoding="utf-8") as f:
                     last_idx = f.read().strip()
             if cur_idx != last_idx:
-                with open(prompts_seen_file, "w", encoding="utf-8") as f:
+                with open(prompts_seen, "w", encoding="utf-8") as f:
                     f.write(cur_idx)
                 bits.append(
-                    "Repo-specific prompt files available in .agentwf/prompts/: "
+                    "Repo prompt files in `.agentwf/prompts/`: "
                     + ", ".join(files)
-                    + ". Read them when relevant — they encode this repo's "
-                    "conventions for PR descriptions, commit messages, and "
-                    "general preferences. Specific files are auto-injected by "
-                    "PreToolUse hooks at point-of-use (e.g. pr.md before "
-                    "`gh pr create`)."
+                    + ". Auto-injected by PreToolUse hooks at point-of-use "
+                    "(e.g. pr.md before `gh pr create`, commit.md before `git commit`)."
                 )
 
     if not bits:

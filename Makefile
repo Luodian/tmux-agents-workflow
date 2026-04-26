@@ -9,6 +9,8 @@ lint:
 	bash -n scripts/aw-setup
 	bash -n scripts/aw-archive
 	bash -n scripts/aw-run
+	bash -n scripts/aw-spec
+	bash -n scripts/aw-notify
 	bash -n scripts/_aw_env.sh
 	bash -n scripts/status-todo-count.sh
 	bash -n install/install.sh

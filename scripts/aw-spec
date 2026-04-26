@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# aw-spec — open .agentwf/spec.md in Neovim, idempotently.
+#
+# Default mode: split a new pane to the right of the current pane,
+# 35% width, with nvim opening the spec file. The created pane id is
+# stashed in the tmux window option `@aw_spec_pane`; subsequent
+# invocations re-select that pane instead of double-spawning.
+#
+# Modes:
+#   aw-spec                 # default: split-window -h -p 35
+#   aw-spec --window         # tmux new-window instead of pane split
+#   aw-spec --popup          # transient display-popup
+#   aw-spec --close          # kill the tracked spec pane
+#
+# Honors $EDITOR for the editor; defaults to nvim if unset.
+# The spec.md is auto-created (from templates/spec.md) if missing.
+
+set -euo pipefail
+trap '' PIPE
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATES_DIR="$(cd "$HERE/../templates" 2>/dev/null && pwd || true)"
+
+mode="split"
+for a in "$@"; do
+  case "$a" in
+    --window) mode="window" ;;
+    --popup)  mode="popup" ;;
+    --close)  mode="close" ;;
+    --split|"") mode="split" ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $a" >&2; exit 2 ;;
+  esac
+done
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$root" ]] || { echo "aw-spec: not in a git repo" >&2; exit 1; }
+
+aw="$root/.agentwf"
+spec="$aw/spec.md"
+mkdir -p "$aw"
+
+if [[ ! -s "$spec" ]]; then
+  if [[ -f "$TEMPLATES_DIR/spec.md" ]]; then
+    cp "$TEMPLATES_DIR/spec.md" "$spec"
+  else
+    printf '# Workspace spec\n<!-- last-author: claude -->\n\n## Contexts\n\n## Decisions\n\n## To-dos\n\n' > "$spec"
+  fi
+fi
+
+editor="${EDITOR:-nvim}"
+# When invoking as a tmux command, single-quote the path to survive the
+# layered shell parsing tmux performs.
+launch_cmd="cd '$root' && $editor '$spec'"
+
+is_pane_alive() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 1
+  tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$pid"
+}
+
+if [[ "$mode" == "close" ]]; then
+  pane="$(tmux show-options -wv @aw_spec_pane 2>/dev/null || true)"
+  if is_pane_alive "$pane"; then
+    tmux kill-pane -t "$pane" 2>/dev/null || true
+  fi
+  tmux set-option -wu @aw_spec_pane 2>/dev/null || true
+  exit 0
+fi
+
+# When not inside tmux: just exec the editor in the foreground.
+if [[ -z "${TMUX:-}" ]]; then
+  exec bash -c "$launch_cmd"
+fi
+
+# Re-select an existing spec pane if present.
+existing="$(tmux show-options -wv @aw_spec_pane 2>/dev/null || true)"
+if is_pane_alive "$existing"; then
+  tmux select-pane -t "$existing"
+  exit 0
+fi
+
+case "$mode" in
+  popup)
+    tmux display-popup -E -w 80% -h 80% "$launch_cmd"
+    ;;
+  window)
+    pane=$(tmux new-window -d -a -P -F '#{pane_id}' -n "spec" "$launch_cmd")
+    tmux set-option -w @aw_spec_pane "$pane"
+    ;;
+  split|*)
+    pane=$(tmux split-window -h -p 35 -P -F '#{pane_id}' -c "$root" "$launch_cmd")
+    tmux set-option -w @aw_spec_pane "$pane"
+    ;;
+esac

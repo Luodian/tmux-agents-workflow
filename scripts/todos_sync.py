@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
-"""Bidirectional parser between Claude TodoWrite JSON and the
-`.agentwf/todos.md` markdown checkbox file.
+"""Bidirectional parser between Claude TodoWrite / Codex update_plan
+hook payloads and `.agentwf/spec.md` (the per-worktree spec file).
 
-Markdown grammar (single source of truth):
+`spec.md` is a single markdown file split into three top-level (`##`)
+sections: **Contexts**, **Decisions**, **To-dos**. The plugin's hooks
+only ever touch the **To-dos** section; Contexts and Decisions are
+written directly by the agent (or by hand). Section-aware read/write
+keeps those two sections intact when TodoWrite mirrors a new list.
 
-    # Workspace todos
-    <optional preamble lines preserved>
-
-    - [ ] pending item                 # status = pending
-    - [~] in-progress item             # status = in_progress
-    - [x] completed item               # status = completed
-    - [X] also completed               # case-insensitive
-
-The parser preserves any non-todo lines in the markdown file (so users
-can keep notes / section headers there). Only checkbox lines round-trip
-to the JSON list.
+Markdown checkbox grammar inside the To-dos section:
+    - [ ] pending
+    - [~] in_progress
+    - [x] completed   (also [X])
 
 CLI:
-    todos_sync.py to-md        < tool_input.json   > todos.md
-    todos_sync.py to-json      < todos.md          > [{...}]
-    todos_sync.py append "content" [--status pending|in_progress|completed]
-                          [--file <path>] [--idempotent]
-    todos_sync.py mark "content-substr" --status completed [--file <path>]
+    todos_sync.py to-md        < tool_input.json   > to-dos.md fragment
+    todos_sync.py to-json      < to-dos.md fragment > [{...}]
+    todos_sync.py append "content" [--status ...] [--file <path>] [--idempotent]
+    todos_sync.py mark "substr" --status completed [--file <path>]
     todos_sync.py count [--file <path>] [--unchecked-only]
+    todos_sync.py extract <section> [--file <path>]   # print one section's body
     todos_sync.py --selftest
+
+`--file` defaults to `$PWD/.agentwf/spec.md` (back-compat: also accepts
+the old `$PWD/.agentwf/todos.md` if present). Section name defaults to
+"To-dos" wherever it matters.
 """
 
 from __future__ import annotations
@@ -33,54 +34,167 @@ import json
 import os
 import re
 import sys
-from typing import Iterable
 
-STATUS_TO_BOX = {
-    "pending": " ",
-    "in_progress": "~",
-    "completed": "x",
-}
-BOX_TO_STATUS = {
-    " ": "pending",
-    "~": "in_progress",
-    "x": "completed",
-    "X": "completed",
-}
+# ── status / box mapping ────────────────────────────────────
 
-# Header line `# Workspace todos` and an authorship marker comment line
-# `<!-- last-author: claude|codex -->`. The marker is preserved by
-# md_to_todos (which only matches checkbox lines), so it round-trips safely.
-AUTHOR_MARKER_RE = re.compile(r"<!--\s*last-author:\s*(\w+)\s*-->")
+STATUS_TO_BOX = {"pending": " ", "in_progress": "~", "completed": "x"}
+BOX_TO_STATUS = {" ": "pending", "~": "in_progress", "x": "completed", "X": "completed"}
 
-# Match `- [ ] content`, `- [x] content`, `- [~] content`. Leading whitespace tolerated.
 TODO_LINE = re.compile(r"^(\s*)-\s*\[([ xX~])\]\s*(.*)$")
-HEADER_DEFAULT = "# Workspace todos"
+H2 = re.compile(r"^##\s+(.+?)\s*$")
+AUTHOR_MARKER_RE = re.compile(r"<!--\s*last-author:\s*(\w+)\s*-->")
+# Strip HTML comments before counting/parsing checkboxes — template
+# explainer comments use the same `- [ ] foo` syntax they document.
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
+DEFAULT_SECTION = "To-dos"
+SPEC_FILE_NAME = "spec.md"
+LEGACY_FILE_NAME = "todos.md"
 
-def todos_to_md(todos: list[dict], author: str | None = None) -> str:
-    """Render a TodoWrite-shaped list into markdown checkboxes.
+# Three-section skeleton used when spec.md doesn't exist yet.
+EMPTY_SPEC = (
+    "# Workspace spec\n<!-- last-author: claude -->\n\n"
+    "## Contexts\n\n"
+    "## Decisions\n\n"
+    "## To-dos\n\n"
+)
 
-    `author` (optional) embeds an HTML comment marker so a peer agent
-    reading the file later can attribute the most recent write.
+# ── section-aware text manipulation ────────────────────────
+
+def split_sections(text: str) -> tuple[str, dict[str, str], list[str]]:
+    """Return (preamble, sections, section_order).
+
+    `preamble` is everything before the first `## Heading` line (typically
+    the H1 title and the author marker). `sections` maps heading → body
+    (without the heading line itself). `section_order` preserves the
+    document's heading order so we can serialize back losslessly.
     """
-    lines: list[str] = [HEADER_DEFAULT, ""]
-    if author:
-        lines.append(f"<!-- last-author: {author} -->")
-        lines.append("")
+    lines = text.splitlines()
+    preamble: list[str] = []
+    sections: dict[str, str] = {}
+    order: list[str] = []
+    current: str | None = None
+    buf: list[str] = []
+    for line in lines:
+        m = H2.match(line)
+        if m:
+            if current is None:
+                pass  # first section starts here
+            else:
+                sections[current] = "\n".join(buf).strip("\n")
+            current = m.group(1).strip()
+            order.append(current)
+            buf = []
+        elif current is None:
+            preamble.append(line)
+        else:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip("\n")
+    return ("\n".join(preamble).strip("\n"), sections, order)
+
+
+def join_sections(preamble: str, sections: dict[str, str], order: list[str]) -> str:
+    parts: list[str] = []
+    if preamble.strip():
+        parts.append(preamble.strip("\n"))
+        parts.append("")  # blank between preamble and first section
+    for name in order:
+        body = sections.get(name, "").strip("\n")
+        parts.append(f"## {name}")
+        parts.append("")
+        if body:
+            parts.append(body)
+            parts.append("")
+    out = "\n".join(parts).rstrip() + "\n"
+    return out
+
+
+def get_section(text: str, name: str = DEFAULT_SECTION) -> str:
+    _, sections, _ = split_sections(text)
+    return sections.get(name, "")
+
+
+def set_section(text: str, name: str, new_body: str) -> str:
+    """Replace a section's body, preserving the rest of the file. If the
+    file is empty or lacks the section, scaffold it from EMPTY_SPEC.
+    """
+    if not text.strip():
+        text = EMPTY_SPEC
+    preamble, sections, order = split_sections(text)
+    sections[name] = new_body.strip("\n")
+    if name not in order:
+        order.append(name)
+    return join_sections(preamble, sections, order)
+
+
+# ── todo list ↔ markdown ───────────────────────────────────
+
+def todos_to_section_body(todos: list[dict]) -> str:
+    """Render a TodoWrite-shaped list into the *body* of the To-dos section
+    (no `## To-dos` heading — that's added by `set_section`).
+    """
+    lines: list[str] = []
     for t in todos:
         if not isinstance(t, dict):
             continue
         content = (t.get("content") or "").strip()
         if not content:
             continue
-        status = t.get("status", "pending")
-        box = STATUS_TO_BOX.get(status, " ")
+        box = STATUS_TO_BOX.get(t.get("status", "pending"), " ")
         lines.append(f"- [{box}] {content}")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines)
+
+
+def section_body_to_todos(body: str) -> list[dict]:
+    body = HTML_COMMENT.sub("", body)  # don't parse checkboxes inside comments
+    out: list[dict] = []
+    for line in body.splitlines():
+        m = TODO_LINE.match(line)
+        if not m:
+            continue
+        box, content = m.group(2), m.group(3).strip()
+        if not content:
+            continue
+        out.append({
+            "content": content,
+            "status": BOX_TO_STATUS.get(box, "pending"),
+            "activeForm": content,
+        })
+    return out
+
+
+# Back-compat aliases — old name exposed so existing imports keep working.
+def todos_to_md(todos: list[dict], author: str | None = None) -> str:
+    """Render a *full* spec.md from a todo list. Used when the file
+    doesn't exist yet — we scaffold all three sections, fill To-dos.
+    """
+    text = EMPTY_SPEC
+    if author:
+        text = re.sub(
+            r"<!--\s*last-author:[^>]*-->",
+            f"<!-- last-author: {author} -->",
+            text,
+            count=1,
+        )
+    return set_section(text, DEFAULT_SECTION, todos_to_section_body(todos))
+
+
+def md_to_todos(text: str) -> list[dict]:
+    """Return the to-dos parsed out of a spec.md (To-dos section only).
+
+    For back-compat with files that have no `## To-dos` heading (legacy
+    todos.md), fall back to scanning the entire body.
+    """
+    _, _, order = split_sections(text)
+    if DEFAULT_SECTION in order:
+        body = get_section(text, DEFAULT_SECTION)
+    else:
+        body = text  # legacy flat todos.md (no `## To-dos` heading)
+    return section_body_to_todos(body)
 
 
 def parse_last_author(text: str) -> str | None:
-    """Read the `<!-- last-author: X -->` marker from a todos.md body."""
     for line in text.splitlines():
         m = AUTHOR_MARKER_RE.search(line)
         if m:
@@ -88,38 +202,26 @@ def parse_last_author(text: str) -> str | None:
     return None
 
 
-def normalize_payload(payload: dict) -> tuple[str, list[dict]]:
-    """Convert a Claude TodoWrite or Codex update_plan hook payload into a
-    unified `(source, todos)` tuple.
+# ── normalize hook payloads from either agent ──────────────
 
-    Returns:
-      - ("claude", [{content, status, activeForm}])   for Claude TodoWrite
-      - ("codex",  [{content, status, activeForm}])   for Codex update_plan
-      - ("unknown", [])                                for anything else
-    """
+def normalize_payload(payload: dict) -> tuple[str, list[dict]]:
     if not isinstance(payload, dict):
         return ("unknown", [])
     tool = payload.get("tool_name", "")
-
     if tool == "TodoWrite":
         items = payload.get("tool_input", {}).get("todos", []) or []
-        out: list[dict] = []
-        for t in items:
-            if not isinstance(t, dict):
-                continue
-            content = (t.get("content") or "").strip()
-            if not content:
-                continue
-            out.append({
-                "content": content,
+        out = [
+            {
+                "content": (t.get("content") or "").strip(),
                 "status": t.get("status", "pending"),
-                "activeForm": t.get("activeForm") or content,
-            })
+                "activeForm": t.get("activeForm") or t.get("content", ""),
+            }
+            for t in items
+            if isinstance(t, dict) and (t.get("content") or "").strip()
+        ]
         return ("claude", out)
-
     if tool == "update_plan":
         ti = payload.get("tool_input", {}) or {}
-        # Codex sometimes nests under arguments (string or dict), sometimes flat.
         plan = None
         for source in (ti.get("arguments"), ti):
             if isinstance(source, str):
@@ -130,48 +232,33 @@ def normalize_payload(payload: dict) -> tuple[str, list[dict]]:
             if isinstance(source, dict) and isinstance(source.get("plan"), list):
                 plan = source["plan"]
                 break
-        plan = plan or []
-        out = []
-        for p in plan:
-            if not isinstance(p, dict):
-                continue
-            step = (p.get("step") or "").strip()
-            if not step:
-                continue
-            out.append({
-                "content": step,
+        out = [
+            {
+                "content": (p.get("step") or "").strip(),
                 "status": p.get("status", "pending"),
-                "activeForm": step,
-            })
+                "activeForm": p.get("step", ""),
+            }
+            for p in (plan or [])
+            if isinstance(p, dict) and (p.get("step") or "").strip()
+        ]
         return ("codex", out)
-
     return ("unknown", [])
 
 
-def md_to_todos(text: str) -> list[dict]:
-    """Parse markdown into TodoWrite-shaped list (only checkbox lines)."""
-    out: list[dict] = []
-    for line in text.splitlines():
-        m = TODO_LINE.match(line)
-        if not m:
-            continue
-        box, content = m.group(2), m.group(3).strip()
-        if not content:
-            continue
-        out.append({
-            "content": content,
-            "status": BOX_TO_STATUS.get(box, "pending"),
-            # activeForm is not represented in the markdown; surface a sensible default.
-            "activeForm": content,
-        })
-    return out
-
+# ── file path resolution (spec.md preferred, todos.md back-compat) ──
 
 def _resolve_file(file_arg: str | None) -> str:
     if file_arg:
         return file_arg
     cwd = os.getcwd()
-    return os.path.join(cwd, ".agentwf", "todos.md")
+    aw = os.path.join(cwd, ".agentwf")
+    spec = os.path.join(aw, SPEC_FILE_NAME)
+    legacy = os.path.join(aw, LEGACY_FILE_NAME)
+    if os.path.exists(spec):
+        return spec
+    if os.path.exists(legacy):
+        return legacy
+    return spec  # default to writing the new path
 
 
 def _read(path: str) -> str:
@@ -187,9 +274,10 @@ def _write(path: str, body: str) -> None:
         f.write(body)
 
 
+# ── CLI commands ───────────────────────────────────────────
+
 def cmd_to_md() -> None:
     payload = json.load(sys.stdin)
-    # Accept both: a raw todos array, or a PostToolUse payload with tool_input.todos.
     if isinstance(payload, dict) and "tool_input" in payload:
         todos = payload.get("tool_input", {}).get("todos", [])
     elif isinstance(payload, dict) and "todos" in payload:
@@ -198,100 +286,105 @@ def cmd_to_md() -> None:
         todos = payload
     else:
         todos = []
-    sys.stdout.write(todos_to_md(todos))
+    sys.stdout.write(todos_to_section_body(todos) + "\n")
 
 
 def cmd_to_json() -> None:
-    text = sys.stdin.read()
-    json.dump(md_to_todos(text), sys.stdout, indent=2)
+    json.dump(section_body_to_todos(sys.stdin.read()), sys.stdout, indent=2)
     sys.stdout.write("\n")
 
 
 def cmd_append(content: str, status: str, file_path: str, idempotent: bool) -> None:
-    body = _read(file_path)
-    todos = md_to_todos(body) if body else []
+    body_full = _read(file_path)
+    todos_body = get_section(body_full, DEFAULT_SECTION) if body_full else ""
+    todos = section_body_to_todos(todos_body)
     if idempotent and any(t["content"] == content for t in todos):
         return
     todos.append({"content": content, "status": status, "activeForm": content})
-    # Preserve any non-todo preamble (e.g., a custom header).
-    preamble_lines: list[str] = []
-    saw_todo = False
-    for line in body.splitlines():
-        if TODO_LINE.match(line):
-            saw_todo = True
-            continue
-        if saw_todo:
-            # Drop trailing prose past the last existing todo to avoid drift.
-            continue
-        preamble_lines.append(line)
-    if not preamble_lines or not any(line.strip() for line in preamble_lines):
-        preamble_lines = [HEADER_DEFAULT, ""]
-    rendered_todos = []
-    for t in todos:
-        box = STATUS_TO_BOX.get(t["status"], " ")
-        rendered_todos.append(f"- [{box}] {t['content']}")
-    out = "\n".join(preamble_lines + rendered_todos) + "\n"
-    _write(file_path, out)
+    new_section = todos_to_section_body(todos)
+    new_full = set_section(body_full or EMPTY_SPEC, DEFAULT_SECTION, new_section)
+    _write(file_path, new_full)
 
 
 def cmd_mark(substr: str, status: str, file_path: str) -> None:
-    body = _read(file_path)
-    if not body:
+    body_full = _read(file_path)
+    if not body_full:
         return
-    out_lines: list[str] = []
+    todos_body = get_section(body_full, DEFAULT_SECTION)
+    if not todos_body:
+        return
     box = STATUS_TO_BOX.get(status, " ")
+    out_lines: list[str] = []
     changed = False
-    for line in body.splitlines():
+    for line in todos_body.splitlines():
         m = TODO_LINE.match(line)
         if m and substr in m.group(3):
             indent = m.group(1)
-            content = m.group(3).strip()
-            out_lines.append(f"{indent}- [{box}] {content}")
+            out_lines.append(f"{indent}- [{box}] {m.group(3).strip()}")
             changed = True
         else:
             out_lines.append(line)
     if changed:
-        _write(file_path, "\n".join(out_lines) + "\n")
+        _write(file_path, set_section(body_full, DEFAULT_SECTION, "\n".join(out_lines)))
 
 
 def cmd_count(file_path: str, unchecked_only: bool) -> None:
-    body = _read(file_path)
-    todos = md_to_todos(body) if body else []
+    body_full = _read(file_path)
+    todos_body = get_section(body_full, DEFAULT_SECTION) if body_full else ""
+    todos = section_body_to_todos(todos_body)
     if unchecked_only:
         todos = [t for t in todos if t["status"] != "completed"]
     print(len(todos))
 
 
+def cmd_extract(section: str, file_path: str) -> None:
+    sys.stdout.write(get_section(_read(file_path), section) + "\n")
+
+
+# ── selftest ───────────────────────────────────────────────
+
 def selftest() -> None:
-    """Round-trip and edge-case checks."""
     sample = [
-        {"content": "Run setup.sh", "status": "completed", "activeForm": "Running setup"},
+        {"content": "Run setup.sh", "status": "completed", "activeForm": "Running"},
         {"content": "Confirm worktree", "status": "in_progress", "activeForm": "Confirming"},
-        {"content": "Open PR", "status": "pending", "activeForm": "Opening PR"},
+        {"content": "Open PR", "status": "pending", "activeForm": "Opening"},
     ]
-    md = todos_to_md(sample)
-    assert "- [x] Run setup.sh" in md, md
-    assert "- [~] Confirm worktree" in md, md
-    assert "- [ ] Open PR" in md, md
+    md = todos_to_md(sample, author="claude")
+    assert "## Contexts" in md and "## Decisions" in md and "## To-dos" in md, md
+    assert "- [x] Run setup.sh" in md and "- [~] Confirm worktree" in md, md
+    assert "<!-- last-author: claude -->" in md, md
 
     parsed = md_to_todos(md)
-    assert len(parsed) == 3, parsed
-    assert parsed[0]["status"] == "completed"
-    assert parsed[1]["status"] == "in_progress"
-    assert parsed[2]["status"] == "pending"
+    assert len(parsed) == 3 and parsed[0]["status"] == "completed", parsed
 
-    # Idempotent append
+    # set_section preserves Contexts and Decisions
+    spec = md.replace("## Contexts\n", "## Contexts\n\n- repo uses uv\n")
+    spec = spec.replace(
+        "## Decisions\n",
+        "## Decisions\n\n### D1: Pick lib\n**Status**: pending\n- [x] foo\n- [ ] bar\n",
+    )
+    new_spec = set_section(spec, "To-dos", "- [ ] new only")
+    assert "- repo uses uv" in new_spec, "Contexts lost"
+    assert "### D1: Pick lib" in new_spec, "Decisions lost"
+    assert "- [ ] new only" in new_spec, "To-dos not replaced"
+    assert "- [x] Run setup.sh" not in new_spec, "Old to-dos leaked"
+
+    # idempotent append + mark
     import tempfile
     with tempfile.TemporaryDirectory() as td:
-        p = os.path.join(td, "todos.md")
+        p = os.path.join(td, "spec.md")
         cmd_append("Open PR", "pending", p, idempotent=False)
-        cmd_append("Open PR", "pending", p, idempotent=True)  # should not duplicate
-        ts = md_to_todos(_read(p))
+        cmd_append("Open PR", "pending", p, idempotent=True)
+        ts = section_body_to_todos(get_section(_read(p), "To-dos"))
         assert sum(1 for t in ts if t["content"] == "Open PR") == 1, ts
-
         cmd_mark("Open PR", "completed", p)
-        ts2 = md_to_todos(_read(p))
+        ts2 = section_body_to_todos(get_section(_read(p), "To-dos"))
         assert ts2[0]["status"] == "completed", ts2
+
+    # legacy flat todos.md still parseable (no headings)
+    legacy = "- [x] alpha\n- [ ] beta\n"
+    parsed_legacy = md_to_todos(legacy)
+    assert len(parsed_legacy) == 2, parsed_legacy
 
     print("selftest OK")
 
@@ -318,13 +411,16 @@ def main() -> None:
     cp.add_argument("--file", default=None)
     cp.add_argument("--unchecked-only", action="store_true")
 
-    p.add_argument("--selftest", action="store_true")
+    ep = sub.add_parser("extract")
+    ep.add_argument("section")
+    ep.add_argument("--file", default=None)
 
+    p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
+
     if args.selftest:
         selftest()
         return
-
     if args.cmd == "to-md":
         cmd_to_md()
     elif args.cmd == "to-json":
@@ -335,6 +431,8 @@ def main() -> None:
         cmd_mark(args.substr, args.status, _resolve_file(args.file))
     elif args.cmd == "count":
         cmd_count(_resolve_file(args.file), args.unchecked_only)
+    elif args.cmd == "extract":
+        cmd_extract(args.section, _resolve_file(args.file))
     else:
         p.print_help()
         sys.exit(2)
