@@ -66,3 +66,73 @@ if [[ -n "${TMUX:-}" ]]; then
     "$HERE/aw-spec" 2>/dev/null || true
   fi
 fi
+
+# ── Linear V2: search + propose Decision block ─────────────
+# When the worktree isn't yet linked and consent != skip, run a fuzzy
+# search using branch + last commit subject and append a `### D-bind:`
+# block to spec.md > Decisions so the agent / user can pick on the next
+# turn (non-blocking — agent proceeds without binding until user [x]'s).
+if [[ ! -f "$aw/.linear-issue" ]]; then
+  consent="$(tmux show-option -gqv '@aw_linear_consent' 2>/dev/null || true)"
+  consent="${consent:-ask}"
+  has_token=0
+  [[ -n "${LINEAR_API_KEY:-}" ]] && has_token=1
+  [[ "$has_token" -eq 0 && -f "$HOME/.claude/credentials/linear-api-key" ]] && has_token=1
+
+  if [[ "$consent" != "skip" && "$has_token" -eq 1 ]]; then
+    last_subject="$(git -C "$root" log -1 --pretty=%s 2>/dev/null || true)"
+    query="${branch:-} ${last_subject:-}"
+    query="${query# }"
+    candidates=""
+    if [[ -n "$query" ]]; then
+      candidates="$("$HERE/aw-link" --search "$query" 2>/dev/null || true)"
+    fi
+    AW_SCRIPTS="$HERE" AW_SPEC="$spec" AW_CANDIDATES="$candidates" python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["AW_SCRIPTS"])
+from todos_sync import get_section, set_section
+
+spec_path = os.environ["AW_SPEC"]
+raw = os.environ.get("AW_CANDIDATES", "").strip()
+lines = [l for l in raw.splitlines() if l.strip() and not l.startswith("(no matches)")]
+
+with open(spec_path, "r", encoding="utf-8") as f:
+    text = f.read()
+if "D-bind" in get_section(text, "Decisions"):
+    sys.exit(0)  # already proposed once; don't re-add on later sessions
+
+candidates = []
+for ln in lines:
+    parts = ln.split(None, 2)
+    if len(parts) < 3:
+        continue
+    candidates.append({"id": parts[0], "state": parts[1], "title": parts[2]})
+
+block: list[str] = ["### D-bind: Bind this task to a Linear issue?"]
+if candidates:
+    rec = f"top match `{candidates[0]['id']}`"
+else:
+    rec = "Create new from this spec.md"
+block += [f"**Status**: pending · **Recommended**: {rec}", ""]
+
+for i, c in enumerate(candidates):
+    mark = "x" if i == 0 else " "
+    block.append(
+        f"- [{mark}] `{c['id']}` — {c['title']} ({c['state']})  "
+        f"← run `aw-link --bind {c['id']}`"
+    )
+if candidates:
+    block.append("- [ ] Create new instead  ← run `aw-link`")
+else:
+    block.append("- [x] Create new (no related issues found)  ← run `aw-link`")
+block.append("- [ ] Skip Linear for this task")
+
+new_block = "\n".join(block)
+existing = get_section(text, "Decisions").strip()
+new_dec = (existing + "\n\n" + new_block) if existing else new_block
+new_text = set_section(text, "Decisions", new_dec)
+with open(spec_path, "w", encoding="utf-8") as f:
+    f.write(new_text)
+PY
+  fi
+fi

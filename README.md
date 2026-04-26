@@ -43,7 +43,14 @@ Sibling to [`tmux-autoname-agent-sessions`](https://github.com/Luodian/tmux-auto
 
 ## What you get
 
-**Linear integration.** `aw-link` binds the current task to a Linear issue, mirroring `spec.md` into the issue body and posting progress comments. Issue ID is stored at `.agentwf/.linear-issue` (gitignored). At task close, `aw-summarize` automatically posts the harvested report as a comment when the task is linked. Auth: `LINEAR_API_KEY` env var or `~/.claude/credentials/linear-api-key`. Set `LINEAR_TEAM_ID` if you have multiple teams (single-team accounts auto-pick).
+**Linear integration.** Linear is treated as a bidirectional context medium — outbound (spec.md → issue body / comments) and inbound (issue description + comments → spec.md > Contexts). `aw-link` binds the current task to a Linear issue; `.agentwf/.linear-issue` (gitignored) holds the binding.
+
+- **Outbound**: `aw-link` (create new) / `--update` (sync body) / `--comment` (progress) / `--close` (transition to Done). `aw-summarize` auto-comments the report when linked.
+- **Inbound**: `aw-link --search "query"` finds candidate issues; `aw-link --bind BRI-12` binds an existing issue and auto-runs `--import` to pull description + last 20 comments into `spec.md > Contexts` so the agent sees prior history.
+- **SessionStart proposal**: when entering an unbound worktree with `LINEAR_API_KEY` set, the SessionStart hook runs a fuzzy search using `branch + last commit subject` and appends a `### D-bind:` Decision block to `spec.md > Decisions` with the top candidates. Non-blocking — agent proceeds; user re-checks `[x]` to override the Recommended pick. Disable with `set -g @aw_linear_consent skip`.
+- **Auto-comment on commits**: when linked + `@aw_linear_auto_comment on` (default), every new HEAD posts a `Commit \`<sha>\` — <subject>` comment. Disable with `set -g @aw_linear_auto_comment off`.
+
+Auth: `LINEAR_API_KEY` env var or `~/.claude/credentials/linear-api-key`. Set `LINEAR_TEAM_ID` only if multiple teams reachable (single-team accounts auto-pick).
 
 | Capability | Mechanism |
 |---|---|

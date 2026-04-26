@@ -4,10 +4,16 @@
 Modes:
     aw-link                    # create new issue from spec.md, save binding
     aw-link --update           # mirror current spec.md into the linked issue body
-    aw-link --comment "msg"    # post a progress comment to the linked issue
+    aw-link --comment "msg"    # post a progress comment ('-' reads stdin)
     aw-link --close            # transition the linked issue to a completed state
     aw-link --status           # print binding info (id / identifier / url)
     aw-link --teams            # list teams reachable with LINEAR_API_KEY (no writes)
+    aw-link --search "query"   # find candidate issues by title fuzzy match
+    aw-link --bind <id|key>    # bind to an existing issue (UUID or `BRI-12`)
+                               # auto-runs --import after a successful bind
+    aw-link --import           # pull description + last 20 comments from the
+                               # linked issue and append a snapshot to
+                               # spec.md > Contexts (issue → agent context)
 
 Auth:
     LINEAR_API_KEY env var (preferred), or `~/.claude/credentials/linear-api-key`
@@ -35,7 +41,14 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from todos_sync import HTML_COMMENT, SPEC_FILE_NAME  # noqa: E402
+from todos_sync import (  # noqa: E402
+    HTML_COMMENT,
+    SPEC_FILE_NAME,
+    get_section,
+    set_section,
+)
+import re
+import datetime
 
 LINEAR_API = "https://api.linear.app/graphql"
 
@@ -291,6 +304,133 @@ def cmd_teams(args: argparse.Namespace, token: str) -> None:
         print(f"{n['id']}  {n['key']:<6} {n['name']}")
 
 
+# ── V2: search / bind-existing / import ─────────────────────
+
+IDENTIFIER_RE = re.compile(r"^([A-Z][A-Z0-9_]+)-(\d+)$")
+
+
+def cmd_search(args: argparse.Namespace, token: str) -> None:
+    """Title fuzzy-match against the user's reachable issues. Limited to
+    the first 5 results (most recent) so it fits in a Decision block.
+    """
+    query = """
+    query Search($q: String!) {
+      issues(
+        filter: { title: { containsIgnoreCase: $q } }
+        first: 5
+        orderBy: updatedAt
+      ) {
+        nodes { id identifier title state { name type } url }
+      }
+    }
+    """
+    data = gql(query, {"q": args.query}, token=token)
+    nodes = data["issues"]["nodes"]
+    if not nodes:
+        print("(no matches)")
+        return
+    for n in nodes:
+        print(f"{n['identifier']:<10} {n['state']['name']:<14} {n['title']}")
+
+
+def cmd_bind(args: argparse.Namespace, token: str) -> None:
+    root = git_root()
+    if read_binding(root):
+        fail("already linked — `aw-link --status` to see; remove `.agentwf/.linear-issue` to rebind")
+
+    # Two flavors of identifier the user might pass.
+    target = args.target
+    m = IDENTIFIER_RE.match(target)
+    if m:
+        team_key, num = m.group(1), int(m.group(2))
+        q = """
+        query I($key: String!, $num: Float!) {
+          issues(filter: { team: { key: { eq: $key } }, number: { eq: $num } }, first: 1) {
+            nodes { id identifier url team { id } }
+          }
+        }
+        """
+        data = gql(q, {"key": team_key, "num": num}, token=token)
+        nodes = data["issues"]["nodes"]
+        if not nodes:
+            fail(f"no issue with identifier {target}")
+        issue = nodes[0]
+    else:
+        # Treat as UUID directly.
+        q = """query I($id: String!) { issue(id: $id) { id identifier url team { id } } }"""
+        data = gql(q, {"id": target}, token=token)
+        issue = data.get("issue")
+        if not issue:
+            fail(f"no issue found for id {target}")
+
+    write_binding(root, {
+        "id":         issue["id"],
+        "identifier": issue["identifier"],
+        "url":        issue["url"],
+        "team_id":    issue["team"]["id"],
+    })
+    print(f"bound  {issue['identifier']}  {issue['url']}")
+    # Pull existing context so the agent sees the issue's history on next turn.
+    cmd_import(args, token)
+
+
+def cmd_import(args: argparse.Namespace, token: str) -> None:
+    root = git_root()
+    binding = read_binding(root)
+    if not binding:
+        fail("no binding — run `aw-link` or `aw-link --bind <id>` first")
+
+    q = """
+    query I($id: String!) {
+      issue(id: $id) {
+        identifier title state { name }
+        description
+        comments(last: 20) { nodes { body createdAt user { displayName } } }
+      }
+    }
+    """
+    data = gql(q, {"id": binding["id"]}, token=token)
+    issue = data["issue"]
+    if not issue:
+        fail("issue fetch returned nothing")
+
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines: list[str] = [
+        f"> **Linear context** (snapshot @ {ts}) — `{issue['identifier']}` "
+        f"_{issue['title']}_ · state: {issue['state']['name']}",
+        ">",
+    ]
+    desc = (issue.get("description") or "").strip()
+    if desc:
+        lines.append("> **Description:**")
+        for ln in desc.splitlines():
+            lines.append(f"> {ln}")
+        lines.append(">")
+    comments = issue.get("comments", {}).get("nodes", [])
+    if comments:
+        lines.append("> **Recent comments:**")
+        for c in comments:
+            who = (c.get("user") or {}).get("displayName") or "?"
+            when = (c.get("createdAt") or "")[:10]
+            body = (c.get("body") or "").strip().replace("\n", " ")
+            if len(body) > 200:
+                body = body[:200].rstrip() + "…"
+            lines.append(f"> - @{who} ({when}): {body}")
+    snippet = "\n".join(lines) + "\n"
+
+    sp = spec_path(root)
+    text = ""
+    if os.path.isfile(sp):
+        with open(sp, "r", encoding="utf-8") as f:
+            text = f.read()
+    contexts_body = get_section(text, "Contexts").strip()
+    new_contexts = (contexts_body + "\n\n" + snippet) if contexts_body else snippet
+    new_text = set_section(text, "Contexts", new_contexts)
+    with open(sp, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    print(f"imported  {issue['identifier']}  ({len(comments)} comment(s))  → spec.md > Contexts")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="aw-link", description=__doc__)
     sub = p.add_subparsers(dest="cmd")
@@ -307,14 +447,25 @@ def main() -> None:
     sub.add_parser("status", help="print binding info")
     sub.add_parser("teams", help="list teams reachable with the API key")
 
-    # Compat aliases so the documented `--update / --comment / --close / --status / --teams`
-    # form Just Works without the user typing a subcommand.
+    sp_p = sub.add_parser("search", help="fuzzy-match issues by title")
+    sp_p.add_argument("query")
+
+    bp = sub.add_parser("bind", help="bind to an existing issue (UUID or BRI-12)")
+    bp.add_argument("target")
+
+    sub.add_parser("import", help="pull issue context (desc + comments) into spec.md > Contexts")
+
+    # Compat aliases so the documented `--<verb>` form Just Works without
+    # the user typing a subcommand.
     p.add_argument("--update", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--comment", help=argparse.SUPPRESS)
     p.add_argument("--close", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--status", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--teams", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--title", help=argparse.SUPPRESS)
+    p.add_argument("--search", help=argparse.SUPPRESS)
+    p.add_argument("--bind", help=argparse.SUPPRESS)
+    p.add_argument("--import", action="store_true", dest="do_import", help=argparse.SUPPRESS)
 
     args = p.parse_args()
 
@@ -330,6 +481,14 @@ def main() -> None:
         args.cmd = "status"
     elif args.teams:
         args.cmd = "teams"
+    elif args.search is not None:
+        args.cmd = "search"
+        args.query = args.search
+    elif args.bind is not None:
+        args.cmd = "bind"
+        args.target = args.bind
+    elif args.do_import:
+        args.cmd = "import"
     elif not args.cmd:
         args.cmd = "create"
 
@@ -341,6 +500,9 @@ def main() -> None:
         "close":   cmd_close,
         "status":  cmd_status,
         "teams":   cmd_teams,
+        "search":  cmd_search,
+        "bind":    cmd_bind,
+        "import":  cmd_import,
     }[args.cmd]
     handler(args, token)
 

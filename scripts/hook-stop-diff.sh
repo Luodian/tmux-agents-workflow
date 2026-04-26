@@ -78,3 +78,14 @@ PY
 if [[ -n "$notify_msg" ]]; then
   "$HERE/aw-notify" "agent stopped on commit $short" "$notify_msg" 2>/dev/null || true
 fi
+
+# ── Linear V2: auto-comment on commits when linked ─────────
+# Best-effort; silent fail (e.g. offline, token revoked) doesn't block
+# the rest of the Stop hook.
+if [[ -f "$aw/.linear-issue" ]]; then
+  auto_comment="$(opt '@aw_linear_auto_comment')"
+  auto_comment="${auto_comment:-on}"
+  if [[ "$auto_comment" == "on" ]]; then
+    "$HERE/aw-link" --comment "Commit \`$short\` — $subject" 2>/dev/null || true
+  fi
+fi
