@@ -4,8 +4,10 @@ A tmux-based, lightweight take on [Conductor](https://www.conductor.build/)'s
 workflow surface — wrapped around [Claude Code](https://github.com/anthropics/claude-code)
 and [Codex CLI](https://github.com/openai/codex) sessions.
 
+**Policy: `.agentwf/` is local-only.** `aw-init` auto-appends it to your repo's `.gitignore` — per-task `spec.md` is transient, lifecycle scripts are user-customized, and durable summaries land in `docs/tasks/<slug>/report.md` via `aw-summarize` at task close.
+
 ```
-.agentwf/                              # everything per-worktree, git-trackable
+.agentwf/                              # gitignored; regenerable via aw-init
 ├── spec.md                            # live spec: Contexts / Decisions / To-dos
 ├── setup.sh                           # runs / shows up as todo on first session
 ├── archive.sh                         # tearing down the worktree (cache cleanup)
@@ -169,6 +171,8 @@ scripts/
   aw-init                         # bootstrap .agentwf/ scaffolding
   aw-setup / aw-archive / aw-run  # lifecycle script runners
   aw-pr                           # soft merge gate around `gh pr create`
+  aw-summarize                    # distill spec.md → workspace docs/tasks/<slug>/report.md
+  _aw_summarize.py                # internal renderer for aw-summarize
   status-todo-count.sh            # optional status-line widget
   _aw_env.sh                      # shared env helper (AW_ROOT / AW_WORKSPACE / AW_PORT)
 templates/

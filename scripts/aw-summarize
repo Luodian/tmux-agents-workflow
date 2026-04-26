@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# aw-summarize — distill `.agentwf/spec.md` into a durable workspace-level
+# report at `<workspace>/docs/tasks/<date>-<slug>/report.md`.
+#
+# Use at the end of a task, before destroying the worktree, so the work
+# survives the worktree teardown and joins the workspace's permanent
+# record (paired with AGENTS.md §Spec-First's "report.md at finish").
+#
+# Usage:
+#   aw-summarize                       # slug = current branch name
+#   aw-summarize --slug agentwf-init   # explicit slug (date prefix added)
+#   aw-summarize --to PATH             # explicit destination, skips slug logic
+#   aw-summarize --print               # write nothing, render to stdout
+#   aw-summarize --no-snapshot         # skip embedding spec.md verbatim
+
+set -euo pipefail
+trap '' PIPE
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+slug=""
+dest=""
+print_only=0
+include_snapshot=1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --slug) slug="$2"; shift 2 ;;
+    --to)   dest="$2"; shift 2 ;;
+    --print) print_only=1; shift ;;
+    --no-snapshot) include_snapshot=0; shift ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Resolve worktree root (where spec.md lives) and workspace root (where the
+# report should land). When inside a linked worktree, --git-common-dir
+# points at the main checkout's .git; its parent is the workspace root.
+worktree_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$worktree_root" ]] || { echo "aw-summarize: not in a git repo" >&2; exit 1; }
+
+git_common="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [[ -n "$git_common" && "$git_common" != /* ]]; then
+  git_common="$worktree_root/$git_common"
+fi
+workspace_root="$(cd "$(dirname "$git_common")" && pwd)"
+
+spec="$worktree_root/.agentwf/spec.md"
+[[ -f "$spec" ]] || { echo "aw-summarize: $spec does not exist" >&2; exit 1; }
+
+if [[ -z "$dest" ]]; then
+  if [[ -z "$slug" ]]; then
+    branch="$(git -C "$worktree_root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo task)"
+    # Strip owner prefix and replace remaining slashes: luodian/chore/foo → chore-foo
+    slug="$(echo "$branch" | sed -E 's#^[^/]+/##; s#[/]#-#g')"
+  fi
+  date_prefix="$(date +%Y-%m-%d)"
+  dest="$workspace_root/docs/tasks/${date_prefix}-${slug}/report.md"
+fi
+
+# Render via the plugin's section-aware parser so we stay consistent with
+# what hooks read/write.
+report="$(AW_SCRIPTS="$HERE" \
+  AW_SPEC="$spec" \
+  AW_WORKTREE="$worktree_root" \
+  AW_SLUG="$slug" \
+  AW_INCLUDE_SNAPSHOT="$include_snapshot" \
+  python3 "$HERE/_aw_summarize.py")"
+
+if [[ "$print_only" -eq 1 ]]; then
+  printf '%s' "$report"
+  exit 0
+fi
+
+mkdir -p "$(dirname "$dest")"
+printf '%s' "$report" > "$dest"
+echo "wrote $dest"

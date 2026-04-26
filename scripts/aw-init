@@ -7,9 +7,15 @@
 # `--force` to overwrite.
 #
 # Usage:
-#   aw-init                # create missing scaffolding
+#   aw-init                # create missing scaffolding + ensure .gitignore
 #   aw-init --force        # overwrite existing files
-#   aw-init --git-track    # also `git add` the new files
+#   aw-init --no-gitignore # don't auto-append `.agentwf/` to .gitignore
+#
+# Policy: `.agentwf/` is local-only — never committed to the team repo.
+# By default aw-init appends `.agentwf/` to the repo's .gitignore (skipped
+# if an equivalent pattern already covers it). Per-task spec.md content
+# is transient; durable summaries land in `docs/tasks/<slug>/report.md`
+# via the `aw-summarize` command at task close.
 
 set -euo pipefail
 # Don't die when piped into head/grep: diagnostic output is best-effort,
@@ -17,12 +23,12 @@ set -euo pipefail
 trap '' PIPE
 
 force=0
-gittrack=0
+do_gitignore=1
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
-    --git-track) gittrack=1 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    --no-gitignore) do_gitignore=0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -135,12 +141,23 @@ copy_template() {
 }
 for f in pr.md prefs.md commit.md review.md; do copy_template "$f"; done
 
-# ── git track if requested ─────────────────────────────────
-if [[ "$gittrack" -eq 1 ]]; then
-  git -C "$root" add .agentwf
-  echo
-  echo "Staged .agentwf/ — review and commit when ready."
+# ── ensure .gitignore covers .agentwf/ ────────────────────
+# Policy: .agentwf/ is local-only. We patch the repo's .gitignore unless
+# an existing pattern already covers it.
+if [[ "$do_gitignore" -eq 1 ]]; then
+  gi="$root/.gitignore"
+  if [[ -f "$gi" ]] && grep -qE '^\s*(\*\*/)?\.agentwf/?\s*$' "$gi"; then
+    echo "  ok     .gitignore already covers .agentwf/"
+  else
+    {
+      [[ -f "$gi" && -s "$gi" ]] && printf '\n'
+      printf '# tmux-agents-workflow runtime spec scaffold — local only\n'
+      printf '.agentwf/\n'
+    } >> "$gi"
+    echo "  patch  .gitignore  (+.agentwf/)"
+  fi
 fi
 
 echo
 echo "Done. Edit .agentwf/{setup,archive,run}.sh and prompts/*.md to taste."
+echo "Tip: use \`aw-summarize\` at task close to harvest spec.md into docs/tasks/<slug>/report.md."

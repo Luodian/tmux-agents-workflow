@@ -11,6 +11,7 @@ lint:
 	bash -n scripts/aw-run
 	bash -n scripts/aw-spec
 	bash -n scripts/aw-notify
+	bash -n scripts/aw-summarize
 	bash -n scripts/_aw_env.sh
 	bash -n scripts/status-todo-count.sh
 	bash -n install/install.sh
@@ -18,7 +19,8 @@ lint:
 	  scripts/todos_sync.py \
 	  scripts/hook_post_todos.py \
 	  scripts/hook_prompt_submit.py \
-	  scripts/hook_pre_bash.py
+	  scripts/hook_pre_bash.py \
+	  scripts/_aw_summarize.py
 	python3 -c 'import json; json.load(open("install/claude-settings.json.patch"))'
 	python3 -c 'import json; json.load(open("install/codex-hooks.json.patch"))'
 
