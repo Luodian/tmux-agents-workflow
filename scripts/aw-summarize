@@ -22,12 +22,16 @@ slug=""
 dest=""
 print_only=0
 include_snapshot=1
+skip_linear=0
+close_linear=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slug) slug="$2"; shift 2 ;;
     --to)   dest="$2"; shift 2 ;;
     --print) print_only=1; shift ;;
     --no-snapshot) include_snapshot=0; shift ;;
+    --no-linear) skip_linear=1; shift ;;
+    --close-linear) close_linear=1; shift ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -75,3 +79,16 @@ fi
 mkdir -p "$(dirname "$dest")"
 printf '%s' "$report" > "$dest"
 echo "wrote $dest"
+
+# Linear sync — when this task is linked (`.agentwf/.linear-issue` exists),
+# push the same report body as a comment on the issue. Opt-out with
+# `--no-linear`; opt-in to also close the issue with `--close-linear`.
+if [[ "$skip_linear" -eq 0 && -f "$worktree_root/.agentwf/.linear-issue" ]]; then
+  if "$HERE/aw-link" --comment "$report" 2>/dev/null; then
+    if [[ "$close_linear" -eq 1 ]]; then
+      "$HERE/aw-link" --close 2>/dev/null || true
+    fi
+  else
+    echo "  (Linear comment failed — skipping; run \`aw-link --comment\` manually)" >&2
+  fi
+fi

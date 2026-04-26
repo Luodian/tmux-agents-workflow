@@ -43,6 +43,8 @@ Sibling to [`tmux-autoname-agent-sessions`](https://github.com/Luodian/tmux-auto
 
 ## What you get
 
+**Linear integration.** `aw-link` binds the current task to a Linear issue, mirroring `spec.md` into the issue body and posting progress comments. Issue ID is stored at `.agentwf/.linear-issue` (gitignored). At task close, `aw-summarize` automatically posts the harvested report as a comment when the task is linked. Auth: `LINEAR_API_KEY` env var or `~/.claude/credentials/linear-api-key`. Set `LINEAR_TEAM_ID` if you have multiple teams (single-team accounts auto-pick).
+
 | Capability | Mechanism |
 |---|---|
 | Per-worktree todo list, blocks `aw-pr` until unchecked items resolve | `.agentwf/spec.md` + `aw-pr` wrapper around `gh pr create` |
@@ -114,6 +116,7 @@ ln -s ~/.tmux/plugins/tmux-agents-workflow/scripts/aw-pr ~/.local/bin/aw-pr
 | `prefix + R` | start dev process via `aw-run` (new background window `run:<workspace>`) |
 | `prefix + M-r` | stop the running dev process (SIGHUP → 200ms → SIGKILL) |
 | `prefix + I` | run `aw-init` in popup |
+| `prefix + L` | bind/sync to a Linear issue (auto: create if unlinked, `--update` if linked) |
 
 Override any binding via `set -g @aw_bind_<name>`. See `tmux-agents-workflow.tmux`.
 
@@ -171,8 +174,9 @@ scripts/
   aw-init                         # bootstrap .agentwf/ scaffolding
   aw-setup / aw-archive / aw-run  # lifecycle script runners
   aw-pr                           # soft merge gate around `gh pr create`
-  aw-summarize                    # distill spec.md → workspace docs/tasks/<slug>/report.md
+  aw-summarize                    # distill spec.md → workspace docs/tasks/<slug>/report.md (+ Linear comment if linked)
   _aw_summarize.py                # internal renderer for aw-summarize
+  aw-link                         # bind task to a Linear issue (create / --update / --comment / --close / --status / --teams)
   status-todo-count.sh            # optional status-line widget
   _aw_env.sh                      # shared env helper (AW_ROOT / AW_WORKSPACE / AW_PORT)
 templates/

@@ -160,4 +160,6 @@ fi
 
 echo
 echo "Done. Edit .agentwf/{setup,archive,run}.sh and prompts/*.md to taste."
-echo "Tip: use \`aw-summarize\` at task close to harvest spec.md into docs/tasks/<slug>/report.md."
+echo "Tip: \`aw-link\` to bind this task to a Linear issue; \`aw-summarize\` at task close"
+echo "     harvests spec.md into docs/tasks/<slug>/report.md (and posts the same as a"
+echo "     Linear comment when linked)."

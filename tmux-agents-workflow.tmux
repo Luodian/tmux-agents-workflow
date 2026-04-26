@@ -83,6 +83,13 @@ if [[ -n "$kill_key" ]]; then
     "root=$git_root_expr; cd \"\$root\" && $CURRENT_DIR/scripts/aw-run --kill"
 fi
 
+# ── prefix + L : aw-link (auto: create if unlinked, update if linked) ──
+link_key="$(normalize_key "$(tmux_opt '@aw_bind_link' 'L')")"
+if [[ -n "$link_key" ]]; then
+  tmux bind-key "$link_key" display-popup -E -w 90% -h 70% \
+    "root=$git_root_expr; cd \"\$root\" && if [[ -f .agentwf/.linear-issue ]]; then $CURRENT_DIR/scripts/aw-link --update; else $CURRENT_DIR/scripts/aw-link; fi; echo; echo 'Press q to close'; read -n 1"
+fi
+
 # ── prefix + I : aw-init (bootstrap .agentwf/ in popup) ─────
 init_key="$(normalize_key "$(tmux_opt '@aw_bind_init' 'I')")"
 if [[ -n "$init_key" ]]; then

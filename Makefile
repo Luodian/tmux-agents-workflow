@@ -12,6 +12,7 @@ lint:
 	bash -n scripts/aw-spec
 	bash -n scripts/aw-notify
 	bash -n scripts/aw-summarize
+	python3 -m py_compile scripts/aw-link
 	bash -n scripts/_aw_env.sh
 	bash -n scripts/status-todo-count.sh
 	bash -n install/install.sh

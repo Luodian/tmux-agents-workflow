@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""aw-link — bind the current task's `.agentwf/spec.md` to a Linear issue.
+
+Modes:
+    aw-link                    # create new issue from spec.md, save binding
+    aw-link --update           # mirror current spec.md into the linked issue body
+    aw-link --comment "msg"    # post a progress comment to the linked issue
+    aw-link --close            # transition the linked issue to a completed state
+    aw-link --status           # print binding info (id / identifier / url)
+    aw-link --teams            # list teams reachable with LINEAR_API_KEY (no writes)
+
+Auth:
+    LINEAR_API_KEY env var (preferred), or `~/.claude/credentials/linear-api-key`
+    (single line containing the token). The plugin never embeds the token.
+
+Team selection:
+    LINEAR_TEAM_ID env var (preferred). If unset and exactly one team is
+    reachable, it's auto-picked. If multiple teams, the script lists them
+    and exits asking the user to set LINEAR_TEAM_ID — non-blocking.
+
+Binding storage:
+    `.agentwf/.linear-issue` (JSON: id, identifier, url, team_id). Gitignored
+    along with the rest of `.agentwf/`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from todos_sync import HTML_COMMENT, SPEC_FILE_NAME  # noqa: E402
+
+LINEAR_API = "https://api.linear.app/graphql"
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"aw-link: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def load_token() -> str:
+    tok = os.environ.get("LINEAR_API_KEY")
+    if tok:
+        return tok.strip()
+    cred = os.path.expanduser("~/.claude/credentials/linear-api-key")
+    if os.path.isfile(cred):
+        with open(cred, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    fail("no LINEAR_API_KEY env var and ~/.claude/credentials/linear-api-key missing")
+
+
+def gql(query: str, variables: dict | None = None, *, token: str) -> dict:
+    body = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+    req = urllib.request.Request(
+        LINEAR_API,
+        data=body,
+        headers={
+            "Authorization": token,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        fail(f"Linear API HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+    if "errors" in payload:
+        fail(f"Linear API error: {json.dumps(payload['errors'])[:400]}")
+    return payload["data"]
+
+
+def git_root() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except subprocess.CalledProcessError:
+        fail("not in a git repo")
+
+
+def spec_path(root: str) -> str:
+    return os.path.join(root, ".agentwf", SPEC_FILE_NAME)
+
+
+def binding_path(root: str) -> str:
+    return os.path.join(root, ".agentwf", ".linear-issue")
+
+
+def read_binding(root: str) -> dict | None:
+    p = binding_path(root)
+    if not os.path.isfile(p):
+        return None
+    with open(p, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_binding(root: str, data: dict) -> None:
+    os.makedirs(os.path.dirname(binding_path(root)), exist_ok=True)
+    with open(binding_path(root), "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def render_spec_for_linear(spec_text: str) -> tuple[str, str]:
+    """Return (title, description) suitable for a Linear issue.
+
+    Title is derived from the H1 if present, otherwise from the current
+    branch (caller can override). Description strips HTML comments since
+    Linear renders them as visible text otherwise.
+    """
+    lines = spec_text.splitlines()
+    title = ""
+    body_lines: list[str] = []
+    for line in lines:
+        if not title and line.startswith("# "):
+            title = line[2:].strip()
+            continue
+        body_lines.append(line)
+    body = HTML_COMMENT.sub("", "\n".join(body_lines)).strip() + "\n"
+    return title, body
+
+
+def resolve_team_id(token: str) -> str:
+    tid = os.environ.get("LINEAR_TEAM_ID")
+    if tid:
+        return tid
+    data = gql("query { teams(first: 50) { nodes { id key name } } }", token=token)
+    nodes = data["teams"]["nodes"]
+    if len(nodes) == 1:
+        return nodes[0]["id"]
+    if not nodes:
+        fail("no Linear teams reachable with this token")
+    print("Multiple Linear teams found; set LINEAR_TEAM_ID to one of:", file=sys.stderr)
+    for n in nodes:
+        print(f"  {n['id']}  {n['key']:<6} {n['name']}", file=sys.stderr)
+    fail("LINEAR_TEAM_ID not set and team is ambiguous")
+
+
+def cmd_create(args: argparse.Namespace, token: str) -> None:
+    root = git_root()
+    sp = spec_path(root)
+    if not os.path.isfile(sp):
+        fail(f"{sp} does not exist (run aw-init / aw-spec first)")
+
+    if read_binding(root):
+        fail("already linked — use --update / --comment / --status; .agentwf/.linear-issue exists")
+
+    with open(sp, "r", encoding="utf-8") as f:
+        spec_text = f.read()
+    title, body = render_spec_for_linear(spec_text)
+
+    if args.title:
+        title = args.title
+    if not title:
+        # Fall back to branch name.
+        try:
+            title = subprocess.check_output(
+                ["git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD"],
+                stderr=subprocess.DEVNULL,
+            ).decode().strip() or "untitled task"
+        except subprocess.CalledProcessError:
+            title = "untitled task"
+
+    team_id = resolve_team_id(token)
+    mutation = """
+    mutation IssueCreate($input: IssueCreateInput!) {
+      issueCreate(input: $input) {
+        success
+        issue { id identifier url title }
+      }
+    }
+    """
+    data = gql(
+        mutation,
+        {"input": {"teamId": team_id, "title": title, "description": body}},
+        token=token,
+    )
+    issue = data["issueCreate"]["issue"]
+    if not data["issueCreate"]["success"] or not issue:
+        fail("Linear refused the issue create (no detail)")
+
+    write_binding(root, {
+        "id": issue["id"],
+        "identifier": issue["identifier"],
+        "url": issue["url"],
+        "team_id": team_id,
+    })
+    print(f"linked  {issue['identifier']}  {issue['url']}")
+
+
+def cmd_update(args: argparse.Namespace, token: str) -> None:
+    root = git_root()
+    binding = read_binding(root)
+    if not binding:
+        fail("no binding — run `aw-link` first to create the issue")
+
+    with open(spec_path(root), "r", encoding="utf-8") as f:
+        spec_text = f.read()
+    _, body = render_spec_for_linear(spec_text)
+
+    mutation = """
+    mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) { success }
+    }
+    """
+    data = gql(mutation, {"id": binding["id"], "input": {"description": body}}, token=token)
+    if not data["issueUpdate"]["success"]:
+        fail("Linear refused the update")
+    print(f"synced  {binding['identifier']}  {binding['url']}")
+
+
+def cmd_comment(args: argparse.Namespace, token: str) -> None:
+    root = git_root()
+    binding = read_binding(root)
+    if not binding:
+        fail("no binding — run `aw-link` first")
+
+    body = args.message
+    if body == "-":
+        body = sys.stdin.read()
+    if not body or not body.strip():
+        fail("empty comment body")
+
+    mutation = """
+    mutation CommentCreate($input: CommentCreateInput!) {
+      commentCreate(input: $input) { success comment { id } }
+    }
+    """
+    data = gql(mutation, {"input": {"issueId": binding["id"], "body": body}}, token=token)
+    if not data["commentCreate"]["success"]:
+        fail("Linear refused the comment")
+    print(f"commented  {binding['identifier']}  {binding['url']}")
+
+
+def cmd_close(args: argparse.Namespace, token: str) -> None:
+    root = git_root()
+    binding = read_binding(root)
+    if not binding:
+        fail("no binding")
+
+    # Find a "completed" workflow state on the issue's team.
+    # Linear's team filter expects ID, not String. (`$teamId: String!` 400s
+    # with "used in position expecting type ID".)
+    state_query = """
+    query StatesByTeam($teamId: ID!) {
+      workflowStates(filter: {team: {id: {eq: $teamId}}}) {
+        nodes { id name type }
+      }
+    }
+    """
+    data = gql(state_query, {"teamId": binding["team_id"]}, token=token)
+    completed = [s for s in data["workflowStates"]["nodes"] if s["type"] == "completed"]
+    if not completed:
+        fail("no `completed`-type workflow state on this team")
+    state_id = completed[0]["id"]
+
+    mutation = """
+    mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) { success }
+    }
+    """
+    data = gql(
+        mutation,
+        {"id": binding["id"], "input": {"stateId": state_id}},
+        token=token,
+    )
+    if not data["issueUpdate"]["success"]:
+        fail("Linear refused the close")
+    print(f"closed  {binding['identifier']}  {binding['url']}  (state={completed[0]['name']})")
+
+
+def cmd_status(args: argparse.Namespace, token: str) -> None:
+    binding = read_binding(git_root())
+    if not binding:
+        print("not linked")
+        return
+    print(json.dumps(binding, indent=2))
+
+
+def cmd_teams(args: argparse.Namespace, token: str) -> None:
+    data = gql("query { teams(first: 50) { nodes { id key name } } }", token=token)
+    for n in data["teams"]["nodes"]:
+        print(f"{n['id']}  {n['key']:<6} {n['name']}")
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(prog="aw-link", description=__doc__)
+    sub = p.add_subparsers(dest="cmd")
+
+    cp = sub.add_parser("create", help="create a Linear issue from spec.md (default)")
+    cp.add_argument("--title", help="override issue title")
+
+    sub.add_parser("update", help="sync spec.md → linked issue body")
+
+    cm = sub.add_parser("comment", help="post a comment on the linked issue")
+    cm.add_argument("message", help="comment body, or '-' to read stdin")
+
+    sub.add_parser("close", help="transition the linked issue to a completed state")
+    sub.add_parser("status", help="print binding info")
+    sub.add_parser("teams", help="list teams reachable with the API key")
+
+    # Compat aliases so the documented `--update / --comment / --close / --status / --teams`
+    # form Just Works without the user typing a subcommand.
+    p.add_argument("--update", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--comment", help=argparse.SUPPRESS)
+    p.add_argument("--close", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--status", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--teams", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--title", help=argparse.SUPPRESS)
+
+    args = p.parse_args()
+
+    # Resolve effective subcommand from either the positional `cmd` or the flag aliases.
+    if args.update:
+        args.cmd = "update"
+    elif args.comment is not None:
+        args.cmd = "comment"
+        args.message = args.comment
+    elif args.close:
+        args.cmd = "close"
+    elif args.status:
+        args.cmd = "status"
+    elif args.teams:
+        args.cmd = "teams"
+    elif not args.cmd:
+        args.cmd = "create"
+
+    token = load_token()
+    handler = {
+        "create":  cmd_create,
+        "update":  cmd_update,
+        "comment": cmd_comment,
+        "close":   cmd_close,
+        "status":  cmd_status,
+        "teams":   cmd_teams,
+    }[args.cmd]
+    handler(args, token)
+
+
+if __name__ == "__main__":
+    main()
