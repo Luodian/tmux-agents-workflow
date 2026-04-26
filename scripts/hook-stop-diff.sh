@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Stop hook: detect HEAD movement during the agent turn; if a new commit
 # landed, append a "Review commit <sha>" todo to .agentwf/spec.md > To-dos
-# and optionally open lazygit in a new tmux window so the user can scrub
-# the diff out-of-band.
+# and surface a Neovim view of the worktree workspace so the user can
+# scrub the diff inside their own editor (fugitive / gitsigns / netrw),
+# rather than getting a separate lazygit window pushed at them.
 #
-# Trigger discipline: opens at most one new window per HEAD change.
+# Default: refocus / spawn the spec.md nvim pane via `aw-spec` — that
+# pane has cwd = worktree root, so it doubles as the diff workspace.
+# Idempotent (`@aw_spec_pane` tracking inside aw-spec).
+#
 # Configuration (tmux options):
-#   @aw_diff_command   command run inside the new window. Default:
-#                      "lazygit" if on PATH, else "git -c color.ui=always show --stat -p HEAD | less -R"
 #   @aw_open_diff      "on" (default) | "off"
+#   @aw_diff_command   if set, run as a split-right pane (-h -p 35) on
+#                      every HEAD move; replaces the default refocus.
+#                      Use this if you prefer lazygit or a custom view.
+#                      Example: set -g @aw_diff_command 'cd "$AW_ROOT" && lazygit'
 
 set -euo pipefail
 trap '' PIPE
@@ -38,7 +44,7 @@ subject="$(git -C "$root" log -1 --pretty=%s "$current" 2>/dev/null || echo "")"
 python3 "$SYNC" append "Review commit $short ($subject)" \
   --status pending --file "$spec" --idempotent
 
-# Only spawn a tmux window if we're inside tmux and not disabled.
+# Pane spawn / refocus only meaningful when we're inside tmux.
 [[ -n "${TMUX:-}" ]] || exit 0
 
 opt() { tmux show-option -gqv "$1" 2>/dev/null || true; }
@@ -47,15 +53,14 @@ enabled="${enabled:-on}"
 [[ "$enabled" == "on" ]] || exit 0
 
 cmd="$(opt '@aw_diff_command')"
-if [[ -z "$cmd" ]]; then
-  if command -v lazygit >/dev/null 2>&1; then
-    cmd="cd '$root' && lazygit"
-  else
-    cmd="cd '$root' && git -c color.ui=always show --stat -p HEAD | less -R"
-  fi
+if [[ -n "$cmd" ]]; then
+  # User opted into a custom diff view — honor it as a split-right pane.
+  tmux split-window -h -p 35 -d -c "$root" "$cmd" 2>/dev/null || true
+else
+  # Default: focus / spawn the spec.md nvim pane. cwd is the worktree
+  # root, so it doubles as the diff workspace.
+  AW_ROOT="$root" "$HERE/aw-spec" >/dev/null 2>&1 || true
 fi
-
-tmux new-window -d -a -n "diff:$short" "$cmd" 2>/dev/null || true
 
 # System notification when the user isn't watching: summarize unresolved
 # work (unchecked todos + pending Decisions). Silent failure if no

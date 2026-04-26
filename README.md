@@ -57,7 +57,7 @@ Auth: `LINEAR_API_KEY` env var or `~/.claude/credentials/linear-api-key`. Set `L
 | Per-worktree todo list, blocks `aw-pr` until unchecked items resolve | `.agentwf/spec.md` + `aw-pr` wrapper around `gh pr create` |
 | Bidirectional sync with agent's plan tool | Claude `TodoWrite` / Codex `update_plan` → `PostToolUse` hook → file; file change → `UserPromptSubmit` `additionalContext` → agent |
 | Auto-populated todos on session start | worktree-isolation gate, "Run setup.sh", "Open PR" sentinel |
-| Per-commit diff window | `Stop` hook detects HEAD move → opens `lazygit` (or `git show HEAD | less`) in a background tmux window named `diff:<sha>` |
+| Per-commit diff review | `Stop` hook detects HEAD move → refocuses the spec.md nvim pane (cwd = worktree root) so you review changes inside your own editor (fugitive / gitsigns / netrw). Opt into a custom split-right pane via `@aw_diff_command`. |
 | Repo lifecycle scripts (setup / archive / run) | `aw-setup` / `aw-archive` / `aw-run`, with `$AW_ROOT` / `$AW_WORKSPACE` / `$AW_PORT` env, SIGHUP→200ms→SIGKILL nonconcurrent run mode |
 | Repo-specific prompts injected just-in-time | `PreToolUse(Bash)` matches `gh pr create` / `git commit` → injects `prompts/{pr,commit}.md` as `additionalContext` |
 | Multi-agent coexistence (Claude + Codex on the same workspace) | `<!-- last-author: claude\|codex -->` marker in spec.md; peer agent gets a "previous update from X" note on next turn |
@@ -130,9 +130,10 @@ Override any binding via `set -g @aw_bind_<name>`. See `tmux-agents-workflow.tmu
 ## Configuration
 
 ```tmux
-# Stop-hook diff window
-set -g @aw_open_diff     'on'        # 'off' to disable auto-window
-set -g @aw_diff_command  ''           # default: lazygit if on PATH, else git show | less
+# Stop-hook diff review (default: refocus the spec.md nvim pane via aw-spec)
+set -g @aw_open_diff     'on'        # 'off' to disable on-commit refocus
+set -g @aw_diff_command  ''          # if set, run as a split-right pane on each HEAD move
+                                     # e.g. 'cd "$AW_ROOT" && lazygit'
 
 # Auto-spawn the spec.md nvim pane on Claude/Codex session start
 set -g @aw_auto_spec     'on'        # 'off' to disable
@@ -162,9 +163,9 @@ prose, the author marker) are preserved on round-trip.
 | Run script + nonconcurrent + SIGHUP→SIGKILL | `aw-run` exact match |
 | Archive script | `aw-archive` |
 | `$CONDUCTOR_*` env | `$AW_ROOT` / `$AW_WORKSPACE` / `$AW_PORT` |
-| Diff viewer | tmux popup (`prefix + D`) + auto background window per commit |
+| Diff viewer | tmux popup (`prefix + D`) + Stop-hook refocus of the spec nvim pane (or custom `@aw_diff_command` split-right pane) |
 | @todos in composer | `UserPromptSubmit` `additionalContext` injection |
-| `conductor.json` team-shared config | `.agentwf/` is git-tracked |
+| `conductor.json` team-shared config | `.agentwf/` is local-only (gitignored); durable summaries land in `docs/tasks/<slug>/report.md` via `aw-summarize` |
 | Slash commands / MCP | Claude Code / Codex CLI handle these directly |
 
 ## Files
@@ -177,7 +178,7 @@ scripts/
   hook_prompt_submit.py           # UserPromptSubmit — file → agent + prompts index
   hook_pre_bash.py                # PreToolUse(Bash) — just-in-time prompt injection
   hook-session-start.sh           # SessionStart — seed auto-todos
-  hook-stop-diff.sh               # Stop — lazygit window on HEAD move
+  hook-stop-diff.sh               # Stop — refocus spec nvim pane on HEAD move
   aw-init                         # bootstrap .agentwf/ scaffolding
   aw-setup / aw-archive / aw-run  # lifecycle script runners
   aw-pr                           # soft merge gate around `gh pr create`
