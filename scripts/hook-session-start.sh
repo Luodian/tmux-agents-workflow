@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # SessionStart hook: ensure .agentwf/spec.md exists with the three-section
-# skeleton, seed automatic todos based on environment, and (when running
-# inside tmux) optionally spawn the spec pane via aw-spec.
+# skeleton, seed automatic todos based on environment, and (opt-in only)
+# spawn the spec pane via aw-spec.
 #
 # Auto-todos (idempotent — never duplicate):
 #   - "Confirm worktree isolation"  if HEAD is on main / master / amilabs
 #   - "Run .agentwf/setup.sh"       if setup.sh exists and .setup-done missing
 #   - "Open PR via aw-pr"            sentinel; last to check off
 #
-# Auto-spawn the Neovim spec pane when:
-#   - $TMUX is set (we're inside a tmux session), AND
-#   - tmux option `@aw_auto_spec` is on (default: on)
+# Auto-spawn the Neovim spec pane is OFF by default at SessionStart.
+# Rationale: at session start the agent has not yet touched the spec this
+# session, so any existing `.agentwf/spec.md` is stale-by-default for the
+# current task — popping nvim on it conflates "spec exists" with "spec is
+# for this task". The Stop hook (hook-stop-diff.sh) handles spec-pane
+# spawn on first commit when the agent actually edited the spec this
+# session (mtime moved past the SessionStart baseline this hook records).
+# Set `@aw_auto_spec=on` to restore legacy eager-open at boot.
 
 set -euo pipefail
 trap '' PIPE
@@ -27,6 +32,19 @@ root="$(aw_repo_root)"
 aw="$root/.agentwf"
 mkdir -p "$aw"
 spec="$(aw_resolve_spec "$root")"
+
+# Record spec mtime baseline. The Stop hook (hook-stop-diff.sh) compares
+# against this to decide whether the spec is the editor target on commit —
+# only when the agent actually touched it this session. 0 marks "no spec
+# at session start". Portable across BSD (macOS) and GNU stat.
+if [[ -e "$spec" ]]; then
+  baseline_mtime="$(stat -f '%m' -- "$spec" 2>/dev/null \
+    || stat -c '%Y' -- "$spec" 2>/dev/null \
+    || echo 0)"
+else
+  baseline_mtime=0
+fi
+echo "$baseline_mtime" > "$aw/.spec-mtime-at-session-start"
 
 # Migrate legacy .agentwf/todos.md (if it exists and the active spec is empty).
 if [[ -f "$aw/todos.md" && ! -s "$spec" ]]; then
@@ -59,10 +77,11 @@ fi
 
 append "Open PR via aw-pr"
 
-# Auto-spawn the Neovim spec pane.
+# Auto-spawn the Neovim spec pane (opt-in only). Default OFF — see the
+# rationale in the file header. Manual on-demand: `prefix + t` (or
+# `aw-spec`). Legacy eager-open: `set -g @aw_auto_spec on`.
 if [[ -n "${TMUX:-}" ]]; then
   auto="$(tmux show-option -gqv '@aw_auto_spec' 2>/dev/null || true)"
-  auto="${auto:-on}"
   if [[ "$auto" == "on" ]]; then
     "$HERE/aw-spec" || true
   fi

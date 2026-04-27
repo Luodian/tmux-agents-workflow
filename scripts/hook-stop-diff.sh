@@ -11,11 +11,17 @@
 #     in the current tmux window, OR
 #   - spawn a fresh split-right pane (cwd = worktree root) if not.
 #
-# Pane target:
-#   - `nvim <spec>` when a spec exists (doubles as the spec editor).
-#   - `nvim <worktree-root>` when no spec exists, so simple tasks still
-#     get a diff-review pane on commit — just navigated free-form via
-#     netrw / Telescope rather than anchored on spec.md.
+# Pane target (freshness-gated):
+#   - `nvim <spec>` only when the agent touched the spec during this
+#     session (current spec mtime > baseline at
+#     `.agentwf/.spec-mtime-at-session-start`, written by
+#     hook-session-start.sh). This anchors the pane on a spec we know is
+#     for the current task — never on a stale spec inherited from a
+#     previous task.
+#   - `nvim <worktree-root>` otherwise — when no spec exists, OR when the
+#     spec is stale (untouched this session). Simple tasks still get a
+#     diff-review pane on commit, navigated free-form via netrw /
+#     Telescope rather than anchored on spec.md.
 #
 # Configuration (tmux options):
 #   @aw_open_diff      "on" (default) | "off"
@@ -86,7 +92,24 @@ else
     tmux select-pane -t "$pane" 2>/dev/null || true
   else
     editor="${EDITOR:-nvim}"
+    # Freshness gate: only target the spec when the agent edited it this
+    # session (current spec mtime > baseline written by hook-session-start.sh).
+    # Stale specs from previous tasks fall through to the no-spec branch so
+    # the diff pane still appears on commit but isn't anchored on irrelevant
+    # content. `_aw_lib.sh:aw_resolve_spec` always returns a path, so the
+    # `-s` check is what distinguishes "exists with content" from "absent".
+    spec_is_fresh=0
     if [[ -s "$spec" ]]; then
+      baseline="$(cat "$aw/.spec-mtime-at-session-start" 2>/dev/null || echo 0)"
+      current_mtime="$(stat -f '%m' -- "$spec" 2>/dev/null \
+        || stat -c '%Y' -- "$spec" 2>/dev/null \
+        || echo 0)"
+      if [[ "$baseline" =~ ^[0-9]+$ && "$current_mtime" =~ ^[0-9]+$ ]] \
+          && (( current_mtime > baseline )); then
+        spec_is_fresh=1
+      fi
+    fi
+    if [[ "$spec_is_fresh" -eq 1 ]]; then
       launch_cmd="cd '$root' && $editor '$spec'"
     else
       launch_cmd="cd '$root' && $editor '$root'"

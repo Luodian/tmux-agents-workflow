@@ -66,7 +66,7 @@ Auth: `LINEAR_API_KEY` env var or `~/.claude/credentials/linear-api-key`. Set `L
 | Per-worktree todo list, blocks `aw-pr` until unchecked items resolve | `.agentwf/spec.md` + `aw-pr` wrapper around `gh pr create` |
 | Bidirectional sync with agent's plan tool | Claude `TodoWrite` / Codex `update_plan` → `PostToolUse` hook → file; file change → `UserPromptSubmit` `additionalContext` → agent |
 | Auto-populated todos on session start | worktree-isolation gate, "Run setup.sh", "Open PR" sentinel |
-| Per-commit diff review | `Stop` hook detects HEAD move → refocuses the diff pane (`@aw_spec_pane`) if alive in the current tmux window, else spawns a fresh split-right pane (cwd = worktree root). Opens `nvim <spec>` when a spec exists, else `nvim <worktree-root>` so simple tasks without a spec still get a diff-review pane on commit. Opt into a custom split-right pane via `@aw_diff_command`. |
+| Per-commit diff review | `Stop` hook detects HEAD move → refocuses the diff pane (`@aw_spec_pane`) if alive in the current tmux window, else spawns a fresh split-right pane (cwd = worktree root). Pane is freshness-gated: opens `nvim <spec>` only when the agent touched the spec during this session (mtime > the SessionStart baseline written by `hook-session-start.sh`); otherwise `nvim <worktree-root>` — so stale specs from previous tasks don't anchor the diff view, while simple tasks without a spec still get a pane on commit. Opt into a custom split-right pane via `@aw_diff_command`. |
 | Repo lifecycle scripts (setup / archive / run) | `aw-setup` / `aw-archive` / `aw-run`, with `$AW_ROOT` / `$AW_WORKSPACE` / `$AW_PORT` env, SIGHUP→200ms→SIGKILL nonconcurrent run mode |
 | Repo-specific prompts injected just-in-time | `PreToolUse(Bash)` matches `gh pr create` / `git commit` → injects `prompts/{pr,commit}.md` as `additionalContext` |
 | Multi-agent coexistence (Claude + Codex on the same workspace) | `<!-- last-author: claude\|codex -->` marker in spec.md; peer agent gets a "previous update from X" note on next turn |
@@ -141,18 +141,24 @@ Override any binding via `set -g @aw_bind_<name>`. See `tmux-agents-workflow.tmu
 
 ```tmux
 # Stop-hook diff review (default: refocus existing diff pane if alive, else
-# spawn new). Pane target is `nvim <spec>` when a spec exists, else
-# `nvim <worktree-root>` so simple tasks without a spec still get a pane
-# on commit.
+# spawn new). Pane target is freshness-gated: `nvim <spec>` only when the
+# agent touched the spec during this session (current mtime > the baseline
+# at `.agentwf/.spec-mtime-at-session-start` written by hook-session-start.sh).
+# Stale specs from previous tasks fall through to `nvim <worktree-root>`,
+# matching the no-spec UX, so the diff pane never anchors on irrelevant
+# content.
 set -g @aw_open_diff     'on'        # 'off' to disable the on-commit pane
 set -g @aw_diff_command  ''          # if set, run as a split-right pane on each HEAD move
                                      # e.g. 'cd "$AW_ROOT" && lazygit'
 
-# Auto-spawn the spec nvim pane (worktree root as cwd) on Claude/Codex session start.
-# Fires ONLY when a spec already exists in `.agentwf/`; tasks without a spec do
-# not trigger a pane. Create a spec explicitly via `aw-spec new <name>` (or the
-# agent's `/spec` slash command) when the task warrants tracking.
-set -g @aw_auto_spec     'on'        # 'off' to disable
+# Auto-spawn the spec nvim pane on Claude/Codex session start.
+# Default: OFF — at SessionStart the agent has not yet touched the spec
+# this session, so any existing `.agentwf/spec.md` is stale-by-default for
+# the current task. The Stop hook (above) opens the pane on the first
+# commit IF the agent edited the spec this session. Use `prefix + t` (or
+# `aw-spec`) to open on demand at any time. Set to `'on'` to restore the
+# legacy eager-open at boot.
+set -g @aw_auto_spec     'off'       # 'on' restores legacy eager-open at boot
 
 # Status-line counter (manual wire)
 set -ag status-right ' #(~/.tmux/plugins/tmux-agents-workflow/scripts/status-todo-count.sh)'
