@@ -27,8 +27,8 @@ sys.path.insert(0, HERE)
 from todos_sync import (  # noqa: E402
     DEFAULT_SECTION,
     EMPTY_SPEC,
-    SPEC_FILE_NAME,
     normalize_payload,
+    resolve_spec_path,
     set_section,
     todos_to_section_body,
 )
@@ -67,7 +67,7 @@ def main() -> None:
 
     aw_dir = os.path.join(root, ".agentwf")
     os.makedirs(aw_dir, exist_ok=True)
-    spec_path = os.path.join(aw_dir, SPEC_FILE_NAME)
+    spec_path = resolve_spec_path(root)
 
     existing = ""
     if os.path.exists(spec_path):

@@ -2,8 +2,10 @@
 # TPM entry point for tmux-agents-workflow.
 #
 # Sibling to tmux-autoname-agent-sessions and tmux-coding-agents. Adds:
-#   - Conductor-style per-worktree todo list (.agentwf/todos.md), bidirectionally
-#     synced with Claude Code's TodoWrite and Codex's update_plan via hooks.
+#   - Conductor-style per-worktree spec file (.agentwf/<name>_spec.md),
+#     bidirectionally synced with Claude Code's TodoWrite and Codex's
+#     update_plan via hooks. Multi-spec aware: a worktree may carry several
+#     specs, with the active one tracked in .agentwf/active-spec.
 #   - lifecycle scripts (.agentwf/{setup,archive,run}.sh) executed via aw-* CLIs
 #     bound to tmux keys (prefix + S / A / R / r).
 #   - repo-specific prompts (.agentwf/prompts/*.md) with just-in-time injection
@@ -33,7 +35,7 @@ normalize_key() {
 # inside each binding, which inherits the pane's working directory.
 git_root_expr='$(git -C "$(tmux display -p "#{pane_current_path}")" rev-parse --show-toplevel 2>/dev/null)'
 
-# ── prefix + t : open .agentwf/spec.md in nvim split pane (right) ──
+# ── prefix + t : open the active .agentwf/<spec> in nvim split pane (right) ──
 # Idempotent: if a spec pane is already alive, re-select it.
 spec_key="$(normalize_key "$(tmux_opt '@aw_bind_spec' 't')")"
 if [[ -n "$spec_key" ]]; then
@@ -41,11 +43,21 @@ if [[ -n "$spec_key" ]]; then
     "root=$git_root_expr; cd \"\$root\" && $CURRENT_DIR/scripts/aw-spec"
 fi
 
-# ── prefix + e : popup-edit fallback (raw editor on spec.md) ────────
+# ── prefix + T : interactive spec switcher (fzf if available) ──
+# Only registered when fzf is on PATH; otherwise the keybind is left untouched
+# so other plugins / user bindings keep working. Override or disable with
+# `set -g @aw_bind_spec_switch off`.
+spec_switch_key="$(normalize_key "$(tmux_opt '@aw_bind_spec_switch' 'T')")"
+if [[ -n "$spec_switch_key" ]] && command -v fzf >/dev/null 2>&1; then
+  tmux bind-key "$spec_switch_key" display-popup -E -w 60% -h 40% \
+    "root=$git_root_expr; cd \"\$root\" && $CURRENT_DIR/scripts/aw-spec switch"
+fi
+
+# ── prefix + e : popup-edit fallback (raw editor on the active spec) ────────
 edit_key="$(normalize_key "$(tmux_opt '@aw_bind_edit' 'e')")"
 if [[ -n "$edit_key" ]]; then
   tmux bind-key "$edit_key" display-popup -E -w 80% -h 80% \
-    "root=$git_root_expr; mkdir -p \"\$root/.agentwf\"; \${EDITOR:-vi} \"\$root/.agentwf/spec.md\""
+    "root=$git_root_expr; spec=\$($CURRENT_DIR/scripts/aw-spec --print-active 2>/dev/null); spec=\"\${spec:-\$root/.agentwf/spec.md}\"; mkdir -p \"\$(dirname \"\$spec\")\"; \${EDITOR:-vi} \"\$spec\""
 fi
 
 # ── prefix + D : git diff popup (on-demand fallback) ────────

@@ -21,13 +21,15 @@ trap '' PIPE
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYNC="$HERE/todos_sync.py"
+# shellcheck source=_aw_lib.sh
+. "$HERE/_aw_lib.sh"
 
-root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+root="$(aw_repo_root)"
 [[ -n "$root" ]] || exit 0
 
 aw="$root/.agentwf"
 mkdir -p "$aw"
-spec="$aw/spec.md"
+spec="$(aw_resolve_spec "$root")"
 last_head_file="$aw/.last-head"
 
 current="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
@@ -65,10 +67,12 @@ fi
 # System notification when the user isn't watching: summarize unresolved
 # work (unchecked todos + pending Decisions). Silent failure if no
 # backend is available.
-notify_msg="$(python3 - "$root" <<'PY' 2>/dev/null || true
+notify_msg="$(AW_SCRIPTS="$HERE" python3 - "$root" <<'PY' 2>/dev/null || true
 import os, re, sys
+sys.path.insert(0, os.environ["AW_SCRIPTS"])
+from todos_sync import resolve_spec_path
 root = sys.argv[1]
-spec = os.path.join(root, ".agentwf", "spec.md")
+spec = resolve_spec_path(root)
 if not os.path.exists(spec):
     sys.exit(0)
 text = open(spec).read()

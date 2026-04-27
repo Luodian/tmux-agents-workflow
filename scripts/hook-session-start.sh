@@ -18,15 +18,17 @@ trap '' PIPE
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYNC="$HERE/todos_sync.py"
 TEMPLATES_DIR="$(cd "$HERE/../templates" 2>/dev/null && pwd || true)"
+# shellcheck source=_aw_lib.sh
+. "$HERE/_aw_lib.sh"
 
-root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+root="$(aw_repo_root)"
 [[ -n "$root" ]] || exit 0
 
 aw="$root/.agentwf"
 mkdir -p "$aw"
-spec="$aw/spec.md"
+spec="$(aw_resolve_spec "$root")"
 
-# Migrate legacy .agentwf/todos.md (if it exists and spec.md doesn't yet).
+# Migrate legacy .agentwf/todos.md (if it exists and the active spec is empty).
 if [[ -f "$aw/todos.md" && ! -s "$spec" ]]; then
   printf '# Workspace spec\n<!-- last-author: claude -->\n\n## Contexts\n\n## Decisions\n\n## To-dos\n\n' > "$spec"
   cat "$aw/todos.md" >> "$spec"

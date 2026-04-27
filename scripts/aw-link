@@ -43,8 +43,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from todos_sync import (  # noqa: E402
     HTML_COMMENT,
-    SPEC_FILE_NAME,
     get_section,
+    resolve_spec_path,
     set_section,
 )
 import re
@@ -101,7 +101,7 @@ def git_root() -> str:
 
 
 def spec_path(root: str) -> str:
-    return os.path.join(root, ".agentwf", SPEC_FILE_NAME)
+    return resolve_spec_path(root)
 
 
 def binding_path(root: str) -> str:

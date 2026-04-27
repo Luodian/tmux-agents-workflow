@@ -31,7 +31,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from todos_sync import SPEC_FILE_NAME, parse_last_author  # noqa: E402
+from todos_sync import parse_last_author, resolve_spec_path  # noqa: E402
 
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
@@ -62,7 +62,7 @@ def main() -> None:
         return
 
     aw = os.path.join(root, ".agentwf")
-    spec_file = os.path.join(aw, SPEC_FILE_NAME)
+    spec_file = resolve_spec_path(root)
     spec_seen = os.path.join(aw, ".last-seen-spec")
     prompts_dir = os.path.join(aw, "prompts")
     prompts_seen = os.path.join(aw, ".last-seen-prompts")
@@ -92,8 +92,9 @@ def main() -> None:
                     f"NOTE: peer agent **{author}** wrote the most recent "
                     "update. Reconcile your in-memory plan if it diverges.\n\n"
                 )
+            spec_rel = os.path.relpath(spec_file, root)
             bits.append(
-                "Workspace spec (`.agentwf/spec.md`) changed since last turn:\n\n"
+                f"Workspace spec (`{spec_rel}`) changed since last turn:\n\n"
                 + peer_note
                 + visible
                 + "\nLegend: To-dos `[ ]`/`[~]`/`[x]` = pending/in_progress/completed. "

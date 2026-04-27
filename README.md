@@ -4,11 +4,13 @@ A tmux-based, lightweight take on [Conductor](https://www.conductor.build/)'s
 workflow surface — wrapped around [Claude Code](https://github.com/anthropics/claude-code)
 and [Codex CLI](https://github.com/openai/codex) sessions.
 
-**Policy: `.agentwf/` is local-only.** `aw-init` auto-appends it to your repo's `.gitignore` — per-task `spec.md` is transient, lifecycle scripts are user-customized, and durable summaries land in `docs/tasks/<slug>/report.md` via `aw-summarize` at task close.
+**Policy: `.agentwf/` is local-only.** `aw-init` auto-appends it to your repo's `.gitignore` — per-task spec files are transient, lifecycle scripts are user-customized, and durable summaries land in `docs/tasks/<slug>/report.md` via `aw-summarize` at task close.
 
 ```
 .agentwf/                              # gitignored; regenerable via aw-init
-├── spec.md                            # live spec: Contexts / Decisions / To-dos
+├── spec.md                            # live spec (single-spec layout)
+├── <name>_spec.md                     # named spec (multi-spec layout)
+├── active-spec                        # one-line pointer: which *_spec.md is active
 ├── setup.sh                           # runs / shows up as todo on first session
 ├── archive.sh                         # tearing down the worktree (cache cleanup)
 ├── run.sh                             # long-running dev process (server, watcher)
@@ -19,7 +21,13 @@ and [Codex CLI](https://github.com/openai/codex) sessions.
     └── review.md                      # self-review checklist
 ```
 
-`spec.md` has three top-level sections — agent maintains all three, user
+The plugin resolves the active spec via, in order: the `AW_SPEC` env var
+(if set), `.agentwf/active-spec` pointer, `spec.md` (regular file or
+symlink), or a unique `*_spec.md` glob. Single-spec workflows keep using
+`spec.md` unchanged. Run `aw-spec list` / `aw-spec switch <name>` /
+`aw-spec new <name>` to manage multi-spec layouts.
+
+The active spec has three top-level sections — agent maintains all three, user
 edits any of them in Neovim (auto-opens in a right-side split pane on
 session start):
 
@@ -115,8 +123,9 @@ ln -s ~/.tmux/plugins/tmux-agents-workflow/scripts/aw-pr ~/.local/bin/aw-pr
 
 | Key | Action |
 |---|---|
-| `prefix + t` | open `.agentwf/spec.md` in nvim split pane (right, idempotent) |
-| `prefix + e` | edit `.agentwf/spec.md` in transient popup (raw editor) |
+| `prefix + t` | open the active `.agentwf/<spec>` in nvim split pane (right, idempotent) |
+| `prefix + T` | interactive spec switcher (registered when `fzf` is on PATH) |
+| `prefix + e` | edit the active spec in a transient popup (raw editor) |
 | `prefix + D` | full `git diff HEAD` in popup |
 | `prefix + S` | run `aw-setup` in popup |
 | `prefix + A` | run `aw-archive` in popup |
@@ -155,6 +164,33 @@ set -ag status-right ' #(~/.tmux/plugins/tmux-agents-workflow/scripts/status-tod
 three-state lifecycle. Lines that don't match the checkbox pattern (headers,
 prose, the author marker) are preserved on round-trip.
 
+## Multi-spec layout
+
+A worktree can carry several specs side-by-side — useful when one repo
+hosts multiple in-flight efforts. File naming is `<name>_spec.md`; the
+active one is tracked in a single-line `.agentwf/active-spec` pointer.
+
+```bash
+aw-spec list                 # show every *_spec.md (active marked '*')
+aw-spec new install          # scaffold install_spec.md, set active, open
+aw-spec switch refactor      # swap active to refactor_spec.md
+aw-spec switch               # interactive picker (requires fzf)
+aw-spec --print-active       # absolute path of the active spec
+```
+
+Resolution falls through these layers, so single-spec setups keep working:
+
+1. `AW_SPEC` env var (per-command override).
+2. `.agentwf/active-spec` (one line: `name_spec.md`).
+3. `.agentwf/spec.md` — regular file or a symlink to a named spec.
+4. A unique `*_spec.md` (no ambiguity → it wins).
+5. Default: create `spec.md` from the template.
+
+Hooks (`hook_post_todos.py`, `hook_prompt_submit.py`, `hook-stop-diff.sh`,
+`status-todo-count.sh`, `aw-pr`, `aw-link`, `aw-summarize`) all read and
+write through the same resolver, so flipping `active-spec` retargets the
+whole workflow without touching any other file.
+
 ## Conductor parity
 
 | Conductor | Here |
@@ -180,6 +216,7 @@ scripts/
   hook-session-start.sh           # SessionStart — seed auto-todos
   hook-stop-diff.sh               # Stop — refocus spec nvim pane on HEAD move
   aw-init                         # bootstrap .agentwf/ scaffolding
+  aw-spec list|switch|new         # multi-spec management (active resolution helpers)
   aw-setup / aw-archive / aw-run  # lifecycle script runners
   aw-pr                           # soft merge gate around `gh pr create`
   aw-summarize                    # distill spec.md → workspace docs/tasks/<slug>/report.md (+ Linear comment if linked)
@@ -187,6 +224,7 @@ scripts/
   aw-link                         # bind task to a Linear issue (create / --update / --comment / --close / --status / --teams)
   status-todo-count.sh            # optional status-line widget
   _aw_env.sh                      # shared env helper (AW_ROOT / AW_WORKSPACE / AW_PORT)
+  _aw_lib.sh                      # shared spec-resolution helper (active spec + listing)
 templates/
   prompts/{pr,prefs,commit,review}.md   # starter prompts copied by aw-init
 install/

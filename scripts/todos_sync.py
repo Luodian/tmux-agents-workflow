@@ -50,6 +50,8 @@ HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 DEFAULT_SECTION = "To-dos"
 SPEC_FILE_NAME = "spec.md"
 LEGACY_FILE_NAME = "todos.md"
+ACTIVE_SPEC_POINTER = "active-spec"
+NAMED_SPEC_SUFFIX = "_spec.md"
 
 # Three-section skeleton used when spec.md doesn't exist yet.
 EMPTY_SPEC = (
@@ -245,20 +247,108 @@ def normalize_payload(payload: dict) -> tuple[str, list[dict]]:
     return ("unknown", [])
 
 
-# ── file path resolution (spec.md preferred, todos.md back-compat) ──
+# ── file path resolution (multi-spec aware, todos.md back-compat) ──
+
+def _sanitize_name(name: str) -> str | None:
+    """Return a safe spec filename or None. Rejects path separators / empty."""
+    name = (name or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return None
+    return name
+
+
+def list_specs(aw_dir: str) -> list[str]:
+    """Return spec filenames (basenames) present under .agentwf/. Order:
+    spec.md first if present, then `*_spec.md` sorted.
+    """
+    if not os.path.isdir(aw_dir):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    spec_md = os.path.join(aw_dir, SPEC_FILE_NAME)
+    if os.path.exists(spec_md) or os.path.islink(spec_md):
+        out.append(SPEC_FILE_NAME)
+        seen.add(SPEC_FILE_NAME)
+    for name in sorted(os.listdir(aw_dir)):
+        if not name.endswith(NAMED_SPEC_SUFFIX):
+            continue
+        if name in seen:
+            continue
+        out.append(name)
+        seen.add(name)
+    return out
+
+
+def active_spec_name(aw_dir: str) -> str:
+    """Resolve the active spec basename for an `.agentwf/` directory.
+
+    Mirrors `_aw_lib.sh::aw_active_spec_name`. Resolution order:
+
+    1. AW_SPEC env var (absolute path or basename) when it names a real
+       file under `aw_dir`.
+    2. `aw_dir/active-spec` pointer file (first non-blank line).
+    3. `aw_dir/spec.md` exists (regular file or symlink) → it wins.
+    4. Exactly one `*_spec.md` glob hit.
+    5. Fallback: `spec.md` (caller is expected to scaffold it).
+    """
+    pinned = os.environ.get("AW_SPEC")
+    if pinned:
+        cand = _sanitize_name(os.path.basename(pinned))
+        if cand:
+            return cand
+
+    pointer_path = os.path.join(aw_dir, ACTIVE_SPEC_POINTER)
+    if os.path.isfile(pointer_path):
+        try:
+            with open(pointer_path, "r", encoding="utf-8") as f:
+                for raw in f:
+                    cand = _sanitize_name(raw)
+                    if cand:
+                        if os.path.exists(os.path.join(aw_dir, cand)):
+                            return cand
+                        break
+        except OSError:
+            pass
+
+    spec_md = os.path.join(aw_dir, SPEC_FILE_NAME)
+    if os.path.exists(spec_md) or os.path.islink(spec_md):
+        return SPEC_FILE_NAME
+
+    if os.path.isdir(aw_dir):
+        named = sorted(
+            n for n in os.listdir(aw_dir) if n.endswith(NAMED_SPEC_SUFFIX)
+        )
+        if len(named) == 1:
+            return named[0]
+
+    return SPEC_FILE_NAME
+
+
+def resolve_spec_path(root: str | None = None) -> str:
+    """Return the absolute spec path for the worktree at `root` (cwd by
+    default). Creates `.agentwf/` if missing; does NOT create the spec
+    file itself.
+    """
+    if root is None:
+        root = os.getcwd()
+    aw = os.path.join(root, ".agentwf")
+    os.makedirs(aw, exist_ok=True)
+    return os.path.join(aw, active_spec_name(aw))
+
 
 def _resolve_file(file_arg: str | None) -> str:
     if file_arg:
         return file_arg
     cwd = os.getcwd()
     aw = os.path.join(cwd, ".agentwf")
-    spec = os.path.join(aw, SPEC_FILE_NAME)
+    # Honour multi-spec resolution before falling back to legacy todos.md.
+    resolved = resolve_spec_path(cwd)
+    if os.path.exists(resolved):
+        return resolved
     legacy = os.path.join(aw, LEGACY_FILE_NAME)
-    if os.path.exists(spec):
-        return spec
     if os.path.exists(legacy):
         return legacy
-    return spec  # default to writing the new path
+    return resolved  # default: write into the resolved path on first use
 
 
 def _read(path: str) -> str:
@@ -385,6 +475,60 @@ def selftest() -> None:
     legacy = "- [x] alpha\n- [ ] beta\n"
     parsed_legacy = md_to_todos(legacy)
     assert len(parsed_legacy) == 2, parsed_legacy
+
+    # multi-spec resolution
+    import tempfile
+    saved_env = os.environ.pop("AW_SPEC", None)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            aw = os.path.join(td, ".agentwf")
+            os.makedirs(aw)
+
+            # 5. fallback when nothing exists → spec.md
+            assert active_spec_name(aw) == "spec.md", active_spec_name(aw)
+
+            # 4. single named spec
+            named = os.path.join(aw, "feature_x_spec.md")
+            open(named, "w").write(EMPTY_SPEC)
+            assert active_spec_name(aw) == "feature_x_spec.md", active_spec_name(aw)
+
+            # 3. spec.md (regular or symlink) trumps the named glob
+            symlink = os.path.join(aw, "spec.md")
+            os.symlink("feature_x_spec.md", symlink)
+            assert active_spec_name(aw) == "spec.md", active_spec_name(aw)
+            os.unlink(symlink)
+
+            # add a second named spec — ambiguous, must fall back to spec.md
+            other = os.path.join(aw, "other_spec.md")
+            open(other, "w").write(EMPTY_SPEC)
+            assert active_spec_name(aw) == "spec.md", active_spec_name(aw)
+
+            # 2. active-spec pointer wins
+            with open(os.path.join(aw, "active-spec"), "w") as f:
+                f.write("other_spec.md\n")
+            assert active_spec_name(aw) == "other_spec.md", active_spec_name(aw)
+
+            # invalid pointer (file not present) falls through
+            with open(os.path.join(aw, "active-spec"), "w") as f:
+                f.write("nope_spec.md\n")
+            assert active_spec_name(aw) == "spec.md", active_spec_name(aw)
+
+            # 1. AW_SPEC env var pin overrides the pointer
+            os.environ["AW_SPEC"] = "feature_x_spec.md"
+            assert active_spec_name(aw) == "feature_x_spec.md", active_spec_name(aw)
+            del os.environ["AW_SPEC"]
+
+            # path traversal in pointer is rejected
+            with open(os.path.join(aw, "active-spec"), "w") as f:
+                f.write("../etc/passwd\n")
+            assert active_spec_name(aw) == "spec.md", active_spec_name(aw)
+
+            # list_specs ordering: spec.md first (when present), then named sorted
+            os.symlink("feature_x_spec.md", os.path.join(aw, "spec.md"))
+            assert list_specs(aw) == ["spec.md", "feature_x_spec.md", "other_spec.md"], list_specs(aw)
+    finally:
+        if saved_env is not None:
+            os.environ["AW_SPEC"] = saved_env
 
     print("selftest OK")
 

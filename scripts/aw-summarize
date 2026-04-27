@@ -49,7 +49,10 @@ if [[ -n "$git_common" && "$git_common" != /* ]]; then
 fi
 workspace_root="$(cd "$(dirname "$git_common")" && pwd)"
 
-spec="$worktree_root/.agentwf/spec.md"
+# shellcheck source=_aw_lib.sh
+. "$HERE/_aw_lib.sh"
+# Honour AW_SPEC env override → multi-spec resolution → templates default.
+spec="$(AW_SCRIPTS="$HERE" python3 -c 'import os, sys; sys.path.insert(0, os.environ["AW_SCRIPTS"]); from todos_sync import resolve_spec_path; print(resolve_spec_path(sys.argv[1]))' "$worktree_root")"
 [[ -f "$spec" ]] || { echo "aw-summarize: $spec does not exist" >&2; exit 1; }
 
 if [[ -z "$dest" ]]; then

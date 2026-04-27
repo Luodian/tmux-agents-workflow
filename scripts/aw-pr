@@ -8,6 +8,8 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYNC="$HERE/todos_sync.py"
+# shellcheck source=_aw_lib.sh
+. "$HERE/_aw_lib.sh"
 
 force=0
 gh_args=()
@@ -18,9 +20,9 @@ for arg in "$@"; do
   esac
 done
 
-root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+root="$(aw_repo_root)"
 spec=""
-[[ -n "$root" ]] && spec="$root/.agentwf/spec.md"
+[[ -n "$root" ]] && spec="$(aw_resolve_spec "$root")"
 
 if [[ -n "$spec" && -f "$spec" && "$force" -eq 0 ]]; then
   unchecked="$(python3 "$SYNC" count --file "$spec" --unchecked-only)"

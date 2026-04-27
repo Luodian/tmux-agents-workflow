@@ -1,52 +1,191 @@
 #!/usr/bin/env bash
-# aw-spec — open .agentwf/spec.md in Neovim, idempotently.
+# aw-spec — manage and open `.agentwf/<name>_spec.md` (multi-spec aware).
 #
-# Default mode: split a new pane to the right of the current pane,
-# 35% width, with nvim opening the spec file. The created pane id is
-# stashed in the tmux window option `@aw_spec_pane`; subsequent
-# invocations re-select that pane instead of double-spawning.
+# Default: open the active spec in Neovim, idempotent. Tracks the spawned
+# pane id in tmux window option `@aw_spec_pane`; subsequent invocations
+# re-select that pane instead of double-spawning.
 #
 # Modes:
-#   aw-spec                 # default: split-window -h -l 35%
-#   aw-spec --window         # tmux new-window instead of pane split
-#   aw-spec --popup          # transient display-popup
-#   aw-spec --close          # kill the tracked spec pane
+#   aw-spec                        # open active spec (split right, 35%)
+#   aw-spec --window               # open in a new tmux window
+#   aw-spec --popup                # open in a transient popup
+#   aw-spec --close                # kill the tracked spec pane
+#   aw-spec --print-active         # echo absolute path of the active spec
+#   aw-spec list                   # list every *_spec.md (active marked '*')
+#   aw-spec switch <name>          # switch the active spec, reopen pane
+#   aw-spec switch                 # interactive picker (fzf if available)
+#   aw-spec new <name>             # scaffold {name}_spec.md, set active, open
 #
-# Honors $EDITOR for the editor; defaults to nvim if unset.
-# The spec.md is auto-created (from templates/spec.md) if missing.
+# Naming: `<name>` may be given with or without the `_spec.md` suffix.
+# Backwards compatible: if `.agentwf/spec.md` exists (regular file or
+# symlink) and no `active-spec` pointer exists, it stays the active spec.
+#
+# Honours $EDITOR (defaults to nvim). Auto-creates the spec file from
+# templates/spec.md if missing.
 
 set -euo pipefail
 trap '' PIPE
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_DIR="$(cd "$HERE/../templates" 2>/dev/null && pwd || true)"
+# shellcheck source=_aw_lib.sh
+. "$HERE/_aw_lib.sh"
+
+usage() { sed -n '2,24p' "$0"; }
+
+# Subcommand detection — list / switch / new are positional, everything
+# else stays in flag form for back-compat with the old script.
+sub=""
+case "${1:-}" in
+  list|switch|new) sub="$1"; shift ;;
+esac
 
 mode="split"
-for a in "$@"; do
-  case "$a" in
-    --window) mode="window" ;;
-    --popup)  mode="popup" ;;
-    --close)  mode="close" ;;
-    --split|"") mode="split" ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
-    *) echo "unknown arg: $a" >&2; exit 2 ;;
-  esac
-done
+target_name=""
+print_active=0
 
-root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "$sub" ]]; then
+  # Subcommand path: parse the remainder.
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      *) target_name="$1"; shift ;;
+    esac
+  done
+else
+  # Open-mode flags.
+  for a in "$@"; do
+    case "$a" in
+      --window) mode="window" ;;
+      --popup)  mode="popup" ;;
+      --close)  mode="close" ;;
+      --print-active) print_active=1 ;;
+      --split|"") mode="split" ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "aw-spec: unknown arg: $a" >&2; exit 2 ;;
+    esac
+  done
+fi
+
+root="$(aw_repo_root)"
 [[ -n "$root" ]] || { echo "aw-spec: not in a git repo" >&2; exit 1; }
-
 aw="$root/.agentwf"
-spec="$aw/spec.md"
 mkdir -p "$aw"
 
-if [[ ! -s "$spec" ]]; then
-  if [[ -f "$TEMPLATES_DIR/spec.md" ]]; then
-    cp "$TEMPLATES_DIR/spec.md" "$spec"
-  else
-    printf '# Workspace spec\n<!-- last-author: claude -->\n\n## Contexts\n\n## Decisions\n\n## To-dos\n\n' > "$spec"
-  fi
+if [[ "$print_active" -eq 1 ]]; then
+  aw_resolve_spec "$root"
+  exit 0
 fi
+
+# Normalize a user-provided name to `<base>_spec.md`. Returns 1 on bad input.
+normalize_spec_name() {
+  local name="$1"
+  name="${name//[[:space:]]/}"
+  case "$name" in
+    ""|*/*|*..*|*'\\'*) return 1 ;;
+  esac
+  if [[ "$name" == *_spec.md ]]; then
+    printf '%s' "$name"
+  elif [[ "$name" == "spec.md" ]]; then
+    printf '%s' "$name"
+  elif [[ "$name" == *.md ]]; then
+    name="${name%.md}"
+    printf '%s_spec.md' "$name"
+  else
+    printf '%s_spec.md' "$name"
+  fi
+}
+
+write_active_pointer() {
+  local name="$1"
+  printf '%s\n' "$name" > "$aw/active-spec"
+}
+
+bootstrap_spec() {
+  local target="$1"
+  if [[ -s "$target" ]]; then
+    return 0
+  fi
+  if [[ -f "$TEMPLATES_DIR/spec.md" ]]; then
+    cp "$TEMPLATES_DIR/spec.md" "$target"
+  else
+    printf '# Workspace spec\n<!-- last-author: claude -->\n\n## Contexts\n\n## Decisions\n\n## To-dos\n\n' > "$target"
+  fi
+}
+
+if [[ "$sub" == "list" ]]; then
+  active_name="$(aw_active_spec_name "$root")"
+  any=0
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    any=1
+    marker="  "
+    [[ "$name" == "$active_name" ]] && marker=" *"
+    printf '%s %s\n' "$marker" "$name"
+  done < <(aw_list_specs "$root")
+  if [[ "$any" -eq 0 ]]; then
+    echo "(no specs in $aw — run \`aw-spec new <name>\` to start)"
+  fi
+  exit 0
+fi
+
+if [[ "$sub" == "switch" ]]; then
+  if [[ -z "$target_name" ]]; then
+    if command -v fzf >/dev/null 2>&1; then
+      target_name="$(aw_list_specs "$root" | fzf --prompt='spec> ' --height=40% --reverse || true)"
+      [[ -n "$target_name" ]] || { echo "aw-spec: no selection" >&2; exit 1; }
+    else
+      echo "aw-spec switch: name required (or install fzf for picker)" >&2
+      exit 2
+    fi
+  fi
+  resolved="$(normalize_spec_name "$target_name" || true)"
+  [[ -n "$resolved" ]] || { echo "aw-spec switch: invalid name '$target_name'" >&2; exit 2; }
+  if [[ ! -e "$aw/$resolved" ]]; then
+    echo "aw-spec switch: $aw/$resolved does not exist (use \`aw-spec new ${resolved%_spec.md}\`)" >&2
+    exit 1
+  fi
+  write_active_pointer "$resolved"
+  echo "active spec → $resolved"
+  # Reopen the pane on the freshly switched spec (close-then-spawn keeps idempotency).
+  if [[ -n "${TMUX:-}" ]]; then
+    pane="$(tmux show-options -wv @aw_spec_pane 2>/dev/null || true)"
+    if [[ -n "$pane" ]]; then
+      tmux kill-pane -t "$pane" 2>/dev/null || true
+      tmux set-option -wu @aw_spec_pane 2>/dev/null || true
+    fi
+    exec "$0"
+  fi
+  exit 0
+fi
+
+if [[ "$sub" == "new" ]]; then
+  [[ -n "$target_name" ]] || { echo "aw-spec new: name required" >&2; exit 2; }
+  resolved="$(normalize_spec_name "$target_name" || true)"
+  [[ -n "$resolved" ]] || { echo "aw-spec new: invalid name '$target_name'" >&2; exit 2; }
+  target="$aw/$resolved"
+  if [[ -e "$target" ]]; then
+    echo "aw-spec new: $target already exists; switching active to it"
+  else
+    bootstrap_spec "$target"
+    echo "wrote $target"
+  fi
+  write_active_pointer "$resolved"
+  echo "active spec → $resolved"
+  if [[ -n "${TMUX:-}" ]]; then
+    pane="$(tmux show-options -wv @aw_spec_pane 2>/dev/null || true)"
+    if [[ -n "$pane" ]]; then
+      tmux kill-pane -t "$pane" 2>/dev/null || true
+      tmux set-option -wu @aw_spec_pane 2>/dev/null || true
+    fi
+    exec "$0"
+  fi
+  exit 0
+fi
+
+# ── default: open the active spec ──────────────────────────────────────
+spec="$(aw_resolve_spec "$root")"
+bootstrap_spec "$spec"
 
 editor="${EDITOR:-nvim}"
 # When invoking as a tmux command, single-quote the path to survive the
