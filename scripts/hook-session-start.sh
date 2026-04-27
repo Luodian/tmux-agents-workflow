@@ -63,7 +63,7 @@ if [[ -n "${TMUX:-}" ]]; then
   auto="$(tmux show-option -gqv '@aw_auto_spec' 2>/dev/null || true)"
   auto="${auto:-on}"
   if [[ "$auto" == "on" ]]; then
-    "$HERE/aw-spec" 2>/dev/null || true
+    "$HERE/aw-spec" || true
   fi
 fi
 

@@ -55,7 +55,7 @@ enabled="${enabled:-on}"
 cmd="$(opt '@aw_diff_command')"
 if [[ -n "$cmd" ]]; then
   # User opted into a custom diff view — honor it as a split-right pane.
-  tmux split-window -h -p 35 -d -c "$root" "$cmd" 2>/dev/null || true
+  tmux split-window -h -l 35% -d -c "$root" "$cmd" 2>/dev/null || true
 else
   # Default: focus / spawn the spec.md nvim pane. cwd is the worktree
   # root, so it doubles as the diff workspace.
