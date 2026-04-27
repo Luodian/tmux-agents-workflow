@@ -20,8 +20,9 @@
 # Backwards compatible: if `.agentwf/spec.md` exists (regular file or
 # symlink) and no `active-spec` pointer exists, it stays the active spec.
 #
-# Honours $EDITOR (defaults to nvim). Auto-creates the spec file from
-# templates/spec.md if missing.
+# Honours $EDITOR (defaults to nvim). The default open path requires an
+# existing spec; create one with `aw-spec new <name>` first. Simple tasks
+# that don't warrant a spec → no pane fires.
 
 set -euo pipefail
 trap '' PIPE
@@ -185,7 +186,6 @@ fi
 
 # ── default: open the active spec ──────────────────────────────────────
 spec="$(aw_resolve_spec "$root")"
-bootstrap_spec "$spec"
 
 editor="${EDITOR:-nvim}"
 # When invoking as a tmux command, single-quote the path to survive the
@@ -205,6 +205,15 @@ if [[ "$mode" == "close" ]]; then
   fi
   tmux set-option -wu @aw_spec_pane 2>/dev/null || true
   exit 0
+fi
+
+# Gate: refuse to open a pane when no spec exists. Simple tasks → no pane.
+# Create a spec explicitly via `aw-spec new <name>` (or the agent's `/spec`
+# slash command) when the task warrants tracking.
+if [[ ! -s "$spec" ]]; then
+  echo "aw-spec: no active spec in $aw" >&2
+  echo "  create one with: aw-spec new <name>" >&2
+  exit 1
 fi
 
 # When not inside tmux: just exec the editor in the foreground.

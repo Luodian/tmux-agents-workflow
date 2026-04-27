@@ -35,13 +35,12 @@ if [[ -f "$aw/todos.md" && ! -s "$spec" ]]; then
   mv "$aw/todos.md" "$aw/todos.md.migrated.bak"
 fi
 
-# Scaffold from template if missing.
+# Spec-gated: if no spec exists yet, this worktree is in "simple task" mode —
+# don't scaffold, don't seed todos, don't auto-spawn the nvim pane, don't
+# propose Linear bindings. Create a spec explicitly via `aw-spec new <name>`
+# (or the agent's `/spec` slash command) when the task warrants tracking.
 if [[ ! -s "$spec" ]]; then
-  if [[ -f "$TEMPLATES_DIR/spec.md" ]]; then
-    cp "$TEMPLATES_DIR/spec.md" "$spec"
-  else
-    printf '# Workspace spec\n<!-- last-author: claude -->\n\n## Contexts\n\n## Decisions\n\n## To-dos\n\n' > "$spec"
-  fi
+  exit 0
 fi
 
 append() {

@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # Stop hook: detect HEAD movement during the agent turn; if a new commit
-# landed, append a "Review commit <sha>" todo to .agentwf/spec.md > To-dos
-# and surface a Neovim view of the worktree workspace so the user can
-# scrub the diff inside their own editor (fugitive / gitsigns / netrw),
-# rather than getting a separate lazygit window pushed at them.
+# landed, append a "Review commit <sha>" todo to spec.md > To-dos (only
+# when a spec exists — simple tasks don't get a forced spec scaffold) and
+# surface a Neovim view of the worktree so the user can scrub the diff
+# inside their own editor (fugitive / gitsigns / netrw), rather than
+# getting a separate lazygit window pushed at them.
 #
-# Default: refocus / spawn the spec.md nvim pane via `aw-spec` — that
-# pane has cwd = worktree root, so it doubles as the diff workspace.
-# Idempotent (`@aw_spec_pane` tracking inside aw-spec).
+# Default pane behavior on every HEAD move:
+#   - refocus the existing diff pane (`@aw_spec_pane`) if it's still alive
+#     in the current tmux window, OR
+#   - spawn a fresh split-right pane (cwd = worktree root) if not.
+#
+# Pane target:
+#   - `nvim <spec>` when a spec exists (doubles as the spec editor).
+#   - `nvim <worktree-root>` when no spec exists, so simple tasks still
+#     get a diff-review pane on commit — just navigated free-form via
+#     netrw / Telescope rather than anchored on spec.md.
 #
 # Configuration (tmux options):
 #   @aw_open_diff      "on" (default) | "off"
@@ -43,8 +51,13 @@ printf '%s\n' "$current" > "$last_head_file"
 
 short="${current:0:7}"
 subject="$(git -C "$root" log -1 --pretty=%s "$current" 2>/dev/null || echo "")"
-python3 "$SYNC" append "Review commit $short ($subject)" \
-  --status pending --file "$spec" --idempotent
+
+# "Review commit" todo only when a spec exists — don't force-scaffold one
+# on commit just to record the review (simple tasks stay simple).
+if [[ -s "$spec" ]]; then
+  python3 "$SYNC" append "Review commit $short ($subject)" \
+    --status pending --file "$spec" --idempotent
+fi
 
 # Pane spawn / refocus only meaningful when we're inside tmux.
 [[ -n "${TMUX:-}" ]] || exit 0
@@ -59,9 +72,30 @@ if [[ -n "$cmd" ]]; then
   # User opted into a custom diff view — honor it as a split-right pane.
   tmux split-window -h -l 35% -d -c "$root" "$cmd" 2>/dev/null || true
 else
-  # Default: focus / spawn the spec.md nvim pane. cwd is the worktree
-  # root, so it doubles as the diff workspace.
-  AW_ROOT="$root" "$HERE/aw-spec" >/dev/null 2>&1 || true
+  # Default: refocus the diff pane if alive in this window, else spawn a
+  # new one. We do NOT delegate to aw-spec here because aw-spec gates on
+  # spec-existence (so simple tasks would get no diff pane at all). Inline
+  # the pane logic so the diff review fires on every commit regardless of
+  # whether a spec exists; @aw_spec_pane stays the single tracking key.
+  pane="$(tmux show-options -wv @aw_spec_pane 2>/dev/null || true)"
+  alive=0
+  if [[ -n "$pane" ]] && tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$pane"; then
+    alive=1
+  fi
+  if [[ "$alive" -eq 1 ]]; then
+    tmux select-pane -t "$pane" 2>/dev/null || true
+  else
+    editor="${EDITOR:-nvim}"
+    if [[ -s "$spec" ]]; then
+      launch_cmd="cd '$root' && $editor '$spec'"
+    else
+      launch_cmd="cd '$root' && $editor '$root'"
+    fi
+    new_pane="$(tmux split-window -h -l 35% -P -F '#{pane_id}' -c "$root" "$launch_cmd" 2>/dev/null || true)"
+    if [[ -n "$new_pane" ]]; then
+      tmux set-option -w @aw_spec_pane "$new_pane" 2>/dev/null || true
+    fi
+  fi
 fi
 
 # System notification when the user isn't watching: summarize unresolved
