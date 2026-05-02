@@ -8,6 +8,8 @@
 #   aw_active_spec_name <root>  echo the chosen spec filename (no path)
 #   aw_resolve_spec <root>      echo the absolute spec path (creates dir; not the file)
 #   aw_list_specs <root>        echo every `*_spec.md` + `spec.md` in .agentwf/
+#   aw_tmux_capture_origin <root>  persist the tmux pane/window/session that started the agent
+#   aw_tmux_origin_{pane,window,session} <root>  echo the best live tmux target
 #
 # Resolution order (must stay in lockstep with todos_sync.resolve_spec_path):
 #   1. AW_SPEC env var (absolute or root-relative). Used to pin a spec for
@@ -112,4 +114,138 @@ aw_resolve_spec() {
   local name
   name="$(aw_active_spec_name "$root")"
   printf '%s/%s\n' "$aw" "$name"
+}
+
+_aw_tmux_state_file() {
+  local root="$1" kind="$2"
+  printf '%s/.agentwf/.tmux-origin-%s\n' "$root" "$kind"
+}
+
+_aw_tmux_read_state() {
+  local root="$1" kind="$2" file
+  file="$(_aw_tmux_state_file "$root" "$kind")"
+  [[ -s "$file" ]] || return 1
+  IFS= read -r value < "$file" || return 1
+  [[ -n "$value" ]] || return 1
+  printf '%s\n' "$value"
+}
+
+_aw_tmux_alive() {
+  local kind="$1" id="$2"
+  [[ -n "${TMUX:-}" && -n "$id" ]] || return 1
+  case "$kind" in
+    pane) tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx -- "$id" ;;
+    window) tmux list-windows -a -F '#{window_id}' 2>/dev/null | grep -qx -- "$id" ;;
+    session) tmux list-sessions -F '#{session_id}' 2>/dev/null | grep -qx -- "$id" ;;
+    *) return 1 ;;
+  esac
+}
+
+aw_tmux_capture_origin() {
+  local root="$1"
+  [[ -n "${TMUX:-}" ]] || return 0
+  mkdir -p "$root/.agentwf"
+
+  local pane="${TMUX_PANE:-}" window="" session=""
+  if [[ -z "$pane" ]]; then
+    pane="$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)"
+  fi
+  if [[ -n "$pane" ]]; then
+    window="$(tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null || true)"
+    session="$(tmux display-message -p -t "$pane" '#{session_id}' 2>/dev/null || true)"
+  fi
+  if [[ -z "$window" ]]; then
+    window="$(tmux display-message -p '#{window_id}' 2>/dev/null || true)"
+  fi
+  if [[ -z "$session" ]]; then
+    session="$(tmux display-message -p '#{session_id}' 2>/dev/null || true)"
+  fi
+
+  [[ -n "$pane" ]] && printf '%s\n' "$pane" > "$(_aw_tmux_state_file "$root" pane)"
+  [[ -n "$window" ]] && printf '%s\n' "$window" > "$(_aw_tmux_state_file "$root" window)"
+  [[ -n "$session" ]] && printf '%s\n' "$session" > "$(_aw_tmux_state_file "$root" session)"
+}
+
+aw_tmux_origin_pane() {
+  local root="$1" pane="" window="" session=""
+  pane="$(_aw_tmux_read_state "$root" pane 2>/dev/null || true)"
+  if _aw_tmux_alive pane "$pane"; then
+    printf '%s\n' "$pane"
+    return 0
+  fi
+
+  window="$(_aw_tmux_read_state "$root" window 2>/dev/null || true)"
+  if _aw_tmux_alive window "$window"; then
+    pane="$(tmux display-message -p -t "$window" '#{pane_id}' 2>/dev/null || true)"
+    if _aw_tmux_alive pane "$pane"; then
+      printf '%s\n' "$pane"
+      return 0
+    fi
+  fi
+
+  session="$(_aw_tmux_read_state "$root" session 2>/dev/null || true)"
+  if _aw_tmux_alive session "$session"; then
+    pane="$(tmux display-message -p -t "$session" '#{pane_id}' 2>/dev/null || true)"
+    if _aw_tmux_alive pane "$pane"; then
+      printf '%s\n' "$pane"
+      return 0
+    fi
+  fi
+
+  pane="${TMUX_PANE:-}"
+  if _aw_tmux_alive pane "$pane"; then
+    printf '%s\n' "$pane"
+    return 0
+  fi
+  tmux display-message -p '#{pane_id}' 2>/dev/null || true
+}
+
+aw_tmux_origin_window() {
+  local root="$1" window="" session="" pane=""
+  window="$(_aw_tmux_read_state "$root" window 2>/dev/null || true)"
+  if _aw_tmux_alive window "$window"; then
+    printf '%s\n' "$window"
+    return 0
+  fi
+
+  session="$(_aw_tmux_read_state "$root" session 2>/dev/null || true)"
+  if _aw_tmux_alive session "$session"; then
+    window="$(tmux display-message -p -t "$session" '#{window_id}' 2>/dev/null || true)"
+    if _aw_tmux_alive window "$window"; then
+      printf '%s\n' "$window"
+      return 0
+    fi
+  fi
+
+  pane="$(aw_tmux_origin_pane "$root")"
+  if [[ -n "$pane" ]]; then
+    tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null || true
+    return 0
+  fi
+  tmux display-message -p '#{window_id}' 2>/dev/null || true
+}
+
+aw_tmux_origin_session() {
+  local root="$1" session="" window="" pane=""
+  session="$(_aw_tmux_read_state "$root" session 2>/dev/null || true)"
+  if _aw_tmux_alive session "$session"; then
+    printf '%s\n' "$session"
+    return 0
+  fi
+
+  window="$(_aw_tmux_read_state "$root" window 2>/dev/null || true)"
+  if _aw_tmux_alive window "$window"; then
+    session="$(tmux display-message -p -t "$window" '#{session_id}' 2>/dev/null || true)"
+    if _aw_tmux_alive session "$session"; then
+      printf '%s\n' "$session"
+      return 0
+    fi
+  fi
+
+  pane="$(aw_tmux_origin_pane "$root")"
+  if [[ -n "$pane" ]]; then
+    tmux display-message -p -t "$pane" '#{session_id}' 2>/dev/null || true
+    return 0
+  fi
+  tmux display-message -p '#{session_id}' 2>/dev/null || true
 }

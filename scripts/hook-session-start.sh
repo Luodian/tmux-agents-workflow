@@ -33,6 +33,11 @@ aw="$root/.agentwf"
 mkdir -p "$aw"
 spec="$(aw_resolve_spec "$root")"
 
+# Capture the tmux pane/window/session that launched this Claude/Codex agent
+# session. Later Stop hooks may run while another tmux session is active, so
+# pane/window creation must target these stable IDs instead of tmux defaults.
+aw_tmux_capture_origin "$root"
+
 # Record spec mtime baseline. The Stop hook (hook-stop-diff.sh) compares
 # against this to decide whether the spec is the editor target on commit —
 # only when the agent actually touched it this session. 0 marks "no spec
