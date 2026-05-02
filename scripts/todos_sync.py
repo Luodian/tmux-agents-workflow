@@ -328,11 +328,40 @@ def resolve_spec_path(root: str | None = None) -> str:
     """Return the absolute spec path for the worktree at `root` (cwd by
     default). Creates `.agentwf/` if missing; does NOT create the spec
     file itself.
+
+    Resolution order (mirrors `_aw_lib.sh::aw_resolve_spec`):
+      0. `.agentwf/active-task` — single-line pointer to the active task's
+         spec anywhere in the repo (Claude Code spec-as-spine v2). Wins over
+         the legacy active-spec scheme. Stale pointer warns on stderr and
+         falls back.
+      1. `.agentwf/<active_spec_name(aw)>` — legacy resolution.
     """
     if root is None:
         root = os.getcwd()
     aw = os.path.join(root, ".agentwf")
     os.makedirs(aw, exist_ok=True)
+
+    # 0. Per-task pointer (Claude Code spec-as-spine v2).
+    task_pointer = os.path.join(aw, "active-task")
+    if os.path.isfile(task_pointer):
+        try:
+            with open(task_pointer, "r", encoding="utf-8") as f:
+                for raw in f:
+                    target = raw.strip()
+                    if not target:
+                        continue
+                    if not os.path.isabs(target):
+                        target = os.path.join(root, target)
+                    if os.path.exists(target):
+                        return target
+                    sys.stderr.write(
+                        f"[aw-spec] WARNING: .agentwf/active-task points to "
+                        f"missing path {target}; falling back to legacy resolution.\n"
+                    )
+                    break
+        except OSError:
+            pass
+
     return os.path.join(aw, active_spec_name(aw))
 
 

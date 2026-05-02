@@ -70,17 +70,25 @@ append() {
   python3 "$SYNC" append "$1" --status pending --file "$spec" --idempotent
 }
 
-branch="$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-case "$branch" in
-  main|master|amilabs)
-    append "Confirm worktree isolation (currently on $branch)" ;;
-esac
+# Skip worktree-level auto-todos when a per-task pointer (`active-task`) is
+# set. Those todos ("Confirm worktree isolation", "Run setup.sh", "Open PR
+# via aw-pr") describe the WORKTREE, not the active task — appending them
+# to the per-task spec at docs/tasks/<slug>/spec.md is noise that the user
+# would have to [~]-skip every session. The pointer is the user's signal
+# that they're in per-task mode and don't want generic worktree boilerplate.
+if [[ ! -s "$aw/active-task" ]]; then
+  branch="$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+  case "$branch" in
+    main|master|amilabs)
+      append "Confirm worktree isolation (currently on $branch)" ;;
+  esac
 
-if [[ -x "$aw/setup.sh" && ! -f "$aw/.setup-done" ]]; then
-  append "Run .agentwf/setup.sh"
+  if [[ -x "$aw/setup.sh" && ! -f "$aw/.setup-done" ]]; then
+    append "Run .agentwf/setup.sh"
+  fi
+
+  append "Open PR via aw-pr"
 fi
-
-append "Open PR via aw-pr"
 
 # Auto-spawn the Neovim spec pane (opt-in only). Default OFF — see the
 # rationale in the file header. Manual on-demand: `prefix + t` (or

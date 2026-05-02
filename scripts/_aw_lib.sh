@@ -12,6 +12,13 @@
 #   aw_tmux_origin_{pane,window,session} <root>  echo the best live tmux target
 #
 # Resolution order (must stay in lockstep with todos_sync.resolve_spec_path):
+#   0. $root/.agentwf/active-task pointer (Claude Code spec-as-spine v2):
+#      a single path (repo-relative or absolute) to the active task's spec
+#      anywhere in the repo, typically docs/tasks/<slug>/spec.md. Wins over
+#      the legacy active-spec scheme so tools that derive their write target
+#      here (hook-session-start, aw-spec, todos_sync, etc.) automatically
+#      scope to the active task instead of the worktree-shared file. Stale
+#      pointer (target missing) warns on stderr and falls back.
 #   1. AW_SPEC env var (absolute or root-relative). Used to pin a spec for
 #      a single command without touching state.
 #   2. $root/.agentwf/active-spec exists, non-empty → name on first non-blank
@@ -111,6 +118,28 @@ aw_resolve_spec() {
   local root="$1"
   local aw="$root/.agentwf"
   mkdir -p "$aw"
+
+  # 0. Per-task pointer (Claude Code spec-as-spine v2). See header for
+  #    rationale. Wins over the legacy active-spec / spec.md resolution.
+  local task_pointer="$aw/active-task"
+  if [[ -s "$task_pointer" ]]; then
+    local target
+    target="$(grep -m1 -v '^[[:space:]]*$' "$task_pointer" 2>/dev/null || true)"
+    target="${target#"${target%%[![:space:]]*}"}"
+    target="${target%"${target##*[![:space:]]}"}"
+    if [[ -n "$target" ]]; then
+      case "$target" in
+        /*) ;;                    # absolute — use as-is
+        *)  target="$root/$target" ;;
+      esac
+      if [[ -e "$target" ]]; then
+        printf '%s\n' "$target"
+        return 0
+      fi
+      printf '[aw-spec] WARNING: .agentwf/active-task points to missing path %s; falling back to legacy resolution.\n' "$target" >&2
+    fi
+  fi
+
   local name
   name="$(aw_active_spec_name "$root")"
   printf '%s/%s\n' "$aw" "$name"
